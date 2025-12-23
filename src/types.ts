@@ -263,6 +263,12 @@ export interface Goal {
   description: string;
   priority: 'immediate' | 'short-term' | 'long-term';
   relatedTensions?: TensionId[];
+  /** Track emails sent pursuing this goal (for anti-repetition) */
+  emailsSent?: EmailId[];
+  /** Track the progression stage of this goal */
+  stage?: 'initial' | 'in_progress' | 'advanced' | 'completed';
+  /** Specific angles/approaches already taken for this goal */
+  approachesTaken?: string[];
 }
 
 export interface Secret {
@@ -493,6 +499,28 @@ export interface Thread {
   lastActivityAt: Date;
   messageCount: number;
   relatedTensions: TensionId[];
+  /** Track the type of communication that started this thread */
+  originType: 'communication' | 'spam' | 'newsletter' | 'external';
+  /** Track conversation state for coherent threading */
+  conversationState?: ConversationState;
+}
+
+export interface ConversationState {
+  /** Questions that have been asked but not answered */
+  pendingQuestions: PendingQuestion[];
+  /** Key points each participant has made (for anti-repetition) */
+  pointsByParticipant: Record<string, string[]>;
+  /** Topics that have been discussed */
+  discussedTopics: string[];
+  /** The current conversation direction/focus */
+  currentFocus?: string;
+}
+
+export interface PendingQuestion {
+  askedBy: CharacterId;
+  question: string;
+  askedInEmail: EmailId;
+  addressedBy?: CharacterId;
 }
 
 // ============================================================================
