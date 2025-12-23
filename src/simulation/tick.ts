@@ -161,10 +161,11 @@ async function generateEmailsFromEvents(
     }
 
     // Check if this is part of an existing thread
-    let thread = findRelatedThread(event, world, sender, recipients);
+    const existingThread = findRelatedThread(event, world, sender, recipients);
     let inReplyTo: EmailId | undefined;
+    let thread: Thread;
 
-    if (!thread) {
+    if (!existingThread) {
       // Create new thread
       const threadId = uuid() as ThreadId;
       thread = {
@@ -179,8 +180,9 @@ async function generateEmailsFromEvents(
       };
       threads.push(thread);
     } else {
+      thread = existingThread;
       // Find email to reply to
-      const threadEmails = world.emails.filter((e) => e.threadId === thread!.id);
+      const threadEmails = world.emails.filter((e) => e.threadId === thread.id);
       if (threadEmails.length > 0) {
         inReplyTo = threadEmails[threadEmails.length - 1].id;
       }

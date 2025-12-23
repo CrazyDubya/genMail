@@ -18,6 +18,9 @@ import type {
   WorldConfig,
   RawDocument,
   Thread,
+  ThreadId,
+  CharacterId,
+  RelationshipType,
   Email,
   FolderType,
 } from '../types.js';
@@ -578,7 +581,10 @@ async function generateUniverse(
   documents: CreateUniverseRequest['documents'],
   config: WorldConfig
 ): Promise<void> {
-  const job = ctx.generationJobs.get(universeId)!;
+  const job = ctx.generationJobs.get(universeId);
+  if (!job) {
+    throw new Error(`Generation job not found for universe ${universeId}`);
+  }
 
   // Helper to update progress with activity timestamp
   const updateProgress = async (
@@ -661,8 +667,8 @@ async function generateUniverse(
     for (const rel of relationships) {
       await ctx.storage.saveRelationship(universeId, {
         id: uuid(),
-        participants: [rel.entity1 as any, rel.entity2 as any],
-        type: rel.type as any,
+        participants: [rel.entity1 as CharacterId, rel.entity2 as CharacterId],
+        type: rel.type as RelationshipType,
         strength: rel.strength,
         sentiment: 0,
       });
@@ -760,7 +766,7 @@ async function generateUniverse(
     for (const [threadId, emails] of threadMap) {
       const sorted = emails.sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime());
       const thread: Thread = {
-        id: threadId as any,
+        id: threadId as ThreadId,
         subject: sorted[0].subject,
         participants: [...new Set(sorted.flatMap((e) => [e.from.characterId, ...e.to.map((t) => t.characterId)]))],
         emails: sorted.map((e) => e.id),
