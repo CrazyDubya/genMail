@@ -773,7 +773,23 @@ class UploadForm extends HTMLElement {
 
       try {
         const documents = await Promise.all(files.map(async (file) => {
-          const content = await file.text();
+          const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+
+          let content;
+          if (isPdf) {
+            // For PDFs, use base64 encoding to preserve binary data
+            const arrayBuffer = await file.arrayBuffer();
+            const bytes = new Uint8Array(arrayBuffer);
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            content = btoa(binary); // Base64 encode
+          } else {
+            // Text files can use text() directly
+            content = await file.text();
+          }
+
           return {
             filename: file.name,
             mimeType: file.type || 'text/plain',
