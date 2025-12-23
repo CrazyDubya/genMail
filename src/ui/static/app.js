@@ -18,6 +18,8 @@ class AppState {
     this.loading = false;
     this.status = null;
     this.listeners = new Set();
+    // Mobile navigation state: 'folders' | 'emails' | 'view'
+    this.mobileView = 'emails';
   }
 
   subscribe(listener) {
@@ -58,7 +60,20 @@ class AppState {
 
   selectEmail(email) {
     this.selectedEmail = email;
+    // Auto-switch to view on mobile when email is selected
+    if (email && this.isMobile()) {
+      this.mobileView = 'view';
+    }
     this.notify();
+  }
+
+  setMobileView(view) {
+    this.mobileView = view;
+    this.notify();
+  }
+
+  isMobile() {
+    return window.innerWidth <= 768;
   }
 
   getEmailsForFolder() {
@@ -298,6 +313,9 @@ class EmailApp extends HTMLElement {
       return;
     }
 
+    const isMobile = state.isMobile();
+    const mobileView = state.mobileView;
+
     this.innerHTML = `
       <header class="header">
         <div class="header-logo">
@@ -308,12 +326,35 @@ class EmailApp extends HTMLElement {
           <span>${state.emails.length} messages recovered</span>
         </div>
       </header>
+      <nav class="mobile-nav">
+        <button class="mobile-nav-btn ${mobileView === 'folders' ? 'active' : ''}" data-view="folders">
+          <span class="icon">📁</span>
+          <span>Folders</span>
+        </button>
+        <button class="mobile-nav-btn ${mobileView === 'emails' ? 'active' : ''}" data-view="emails">
+          <span class="icon">📧</span>
+          <span>Emails</span>
+        </button>
+        <button class="mobile-nav-btn ${mobileView === 'view' ? 'active' : ''}" data-view="view" ${!state.selectedEmail ? 'disabled' : ''}>
+          <span class="icon">📄</span>
+          <span>View</span>
+        </button>
+      </nav>
       <div class="main-content">
-        <folder-list></folder-list>
-        <email-list></email-list>
-        <email-view></email-view>
+        <folder-list class="${isMobile && mobileView === 'folders' ? 'active' : ''}"></folder-list>
+        <email-list class="${isMobile && mobileView !== 'emails' ? 'hidden-mobile' : ''}"></email-list>
+        <email-view class="${isMobile && mobileView === 'view' ? 'active' : ''}"></email-view>
       </div>
     `;
+
+    // Attach mobile nav event listeners
+    this.querySelectorAll('.mobile-nav-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const view = btn.dataset.view;
+        if (view === 'view' && !state.selectedEmail) return;
+        state.setMobileView(view);
+      });
+    });
   }
 }
 
@@ -482,6 +523,10 @@ class FolderList extends HTMLElement {
     this.querySelectorAll('.folder-item').forEach(item => {
       item.addEventListener('click', () => {
         state.selectFolder(item.dataset.folder);
+        // On mobile, switch to emails view after selecting folder
+        if (state.isMobile()) {
+          state.setMobileView('emails');
+        }
       });
     });
   }
@@ -595,6 +640,10 @@ class EmailView extends HTMLElement {
 
   render() {
     this.className = 'email-view';
+    // Add active class on mobile if in view mode
+    if (state.isMobile() && state.mobileView === 'view') {
+      this.classList.add('active');
+    }
 
     if (!state.selectedEmail) {
       this.innerHTML = `
@@ -609,8 +658,15 @@ class EmailView extends HTMLElement {
     const thread = state.getThread(email.threadId);
     const isThread = thread.length > 1;
 
+    const backButton = `
+      <button class="mobile-back-btn" onclick="state.setMobileView('emails')">
+        ← Back to emails
+      </button>
+    `;
+
     if (isThread) {
       this.innerHTML = `
+        ${backButton}
         <div class="email-view-header">
           <div class="email-view-subject">${escapeHtml(email.subject)}</div>
           <div style="color: var(--text-muted); font-size: 0.9em;">
@@ -636,6 +692,7 @@ class EmailView extends HTMLElement {
       `;
     } else {
       this.innerHTML = `
+        ${backButton}
         <div class="email-view-header">
           <div class="email-view-subject">${escapeHtml(email.subject)}</div>
           <div class="email-view-meta">

@@ -647,15 +647,27 @@ email-app {
 @media (max-width: 768px) {
   .main-content {
     grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
   }
 
-  .folder-list,
-  .email-list {
+  /* Hide folder list and email view by default on mobile */
+  .folder-list {
     display: none;
   }
 
-  .folder-list.active,
-  .email-list.active {
+  /* Email list is visible by default on mobile */
+  .email-list {
+    display: block;
+    border-right: none;
+  }
+
+  /* Email view hidden until an email is selected */
+  .email-view {
+    display: none;
+  }
+
+  /* When folder list is active (shown), hide email list */
+  .folder-list.active {
     display: block;
     position: absolute;
     top: 60px;
@@ -663,5 +675,99 @@ email-app {
     right: 0;
     bottom: 0;
     z-index: 100;
+    background: var(--bg-secondary);
+  }
+
+  /* When email view is active (email selected), show it and hide email list */
+  .email-view.active {
+    display: flex;
+    position: absolute;
+    top: 60px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 100;
+    background: var(--bg-primary);
+  }
+
+  /* Mobile header adjustments */
+  .header {
+    flex-wrap: wrap;
+    padding: var(--spacing-sm);
+  }
+
+  .header-logo h1 {
+    font-size: 1em;
+  }
+
+  .header-status {
+    font-size: 0.8em;
+  }
+}
+
+/* Mobile navigation bar */
+.mobile-nav {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .mobile-nav {
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    padding: var(--spacing-sm);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mobile-nav-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: var(--spacing-sm);
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 0.75em;
+    cursor: pointer;
+    transition: color var(--transition-fast);
+  }
+
+  .mobile-nav-btn:hover,
+  .mobile-nav-btn.active {
+    color: var(--accent);
+  }
+
+  .mobile-nav-btn .icon {
+    font-size: 1.5em;
+  }
+
+  /* Back button for email view */
+  .mobile-back-btn {
+    display: none;
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    cursor: pointer;
+  }
+
+  .email-view.active .mobile-back-btn {
+    display: block;
+  }
+
+  /* Hide email list when not in emails view */
+  .email-list.hidden-mobile {
+    display: none;
+  }
+
+  /* Disabled nav button style */
+  .mobile-nav-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 }
