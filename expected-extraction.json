@@ -1,0 +1,315 @@
+{
+  "documentId": "sample-project-report",
+  "extractionTimestamp": "2024-09-15T00:00:00Z",
+  
+  "entities": [
+    {
+      "id": "ent_sarah_chen",
+      "type": "person",
+      "name": "Dr. Sarah Chen",
+      "aliases": ["Sarah", "Chen"],
+      "role": "Project Lead",
+      "attributes": {
+        "title": "Dr.",
+        "responsibilities": ["overall vision", "stakeholder management"],
+        "isAuthor": true
+      },
+      "mentionCount": 4,
+      "confidence": 0.98
+    },
+    {
+      "id": "ent_marcus_webb",
+      "type": "person",
+      "name": "Marcus Webb",
+      "aliases": ["Marcus"],
+      "role": "Technical Architect",
+      "attributes": {
+        "responsibilities": ["system design", "infrastructure"],
+        "position": "proposing migration to edge computing",
+        "concerns": ["infrastructure costs", "Q4 budget"]
+      },
+      "mentionCount": 3,
+      "confidence": 0.95
+    },
+    {
+      "id": "ent_priya_sharma",
+      "type": "person",
+      "name": "Priya Sharma",
+      "aliases": ["Priya"],
+      "role": "Lead Engineer",
+      "attributes": {
+        "responsibilities": ["core algorithm development"],
+        "achievements": ["novel ensemble method for sparse data"],
+        "concerns": ["technical debt", "building on sand"]
+      },
+      "mentionCount": 3,
+      "confidence": 0.95
+    },
+    {
+      "id": "ent_james_okonkwo",
+      "type": "person",
+      "name": "James Okonkwo",
+      "aliases": ["James"],
+      "role": "Operations",
+      "attributes": {
+        "responsibilities": ["deployment", "monitoring"],
+        "position": "opposes urgent migration",
+        "argument": "current system is stable"
+      },
+      "mentionCount": 2,
+      "confidence": 0.95
+    },
+    {
+      "id": "ent_lisa_park",
+      "type": "person",
+      "name": "Lisa Park",
+      "aliases": ["Lisa"],
+      "role": "Product",
+      "attributes": {
+        "responsibilities": ["user research", "requirements"]
+      },
+      "mentionCount": 2,
+      "confidence": 0.92
+    },
+    {
+      "id": "ent_richard_hartley",
+      "type": "person",
+      "name": "Prof. Richard Hartley",
+      "aliases": ["Hartley", "Prof. Hartley"],
+      "role": "External Technical Advisor",
+      "attributes": {
+        "affiliation": "Stanford",
+        "status": "unusually quiet lately",
+        "concern": "last three emails unanswered"
+      },
+      "mentionCount": 2,
+      "confidence": 0.90
+    },
+    {
+      "id": "ent_diana_reyes",
+      "type": "person",
+      "name": "Diana Reyes",
+      "aliases": ["Diana"],
+      "role": "Legal",
+      "attributes": {
+        "responsibilities": ["compliance", "IP review"],
+        "currentTask": "monitoring Nexus Labs for IP concerns"
+      },
+      "mentionCount": 2,
+      "confidence": 0.88
+    },
+    {
+      "id": "ent_project_meridian",
+      "type": "organization",
+      "name": "Project Meridian",
+      "aliases": ["Meridian"],
+      "attributes": {
+        "duration": "18 months",
+        "stage": "alpha deployment",
+        "classification": "confidential"
+      },
+      "mentionCount": 3,
+      "confidence": 0.98
+    },
+    {
+      "id": "ent_nexus_labs",
+      "type": "organization",
+      "name": "Nexus Labs",
+      "aliases": ["Nexus"],
+      "attributes": {
+        "relationship": "competitor",
+        "approach": "rule-based (vs ML)",
+        "status": "aggressive marketing"
+      },
+      "mentionCount": 2,
+      "confidence": 0.95
+    },
+    {
+      "id": "ent_prediction_engine",
+      "type": "concept",
+      "name": "Core Prediction Engine",
+      "aliases": ["prediction engine", "algorithm"],
+      "attributes": {
+        "precision": "94.2%",
+        "recall": "87.8%",
+        "latency": "23ms p99",
+        "status": "exceeding targets"
+      },
+      "mentionCount": 2,
+      "confidence": 0.92
+    },
+    {
+      "id": "ent_edge_migration",
+      "type": "concept",
+      "name": "Edge Computing Migration",
+      "aliases": ["migration", "edge architecture"],
+      "attributes": {
+        "proposedBy": "Marcus Webb",
+        "benefit": "cost reduction",
+        "risk": "significant re-architecture",
+        "deadline": "September 15"
+      },
+      "mentionCount": 3,
+      "confidence": 0.90
+    },
+    {
+      "id": "ent_tech_debt",
+      "type": "concept",
+      "name": "Technical Debt",
+      "aliases": ["tech debt"],
+      "attributes": {
+        "todoComments": 340,
+        "testCoverage": "12%",
+        "undocumentedSubsystems": 3,
+        "flaggedBy": "Priya Sharma"
+      },
+      "mentionCount": 2,
+      "confidence": 0.95
+    },
+    {
+      "id": "ent_enterprise_prospect",
+      "type": "organization",
+      "name": "[Enterprise Prospect - NDA]",
+      "aliases": ["unnamed prospect"],
+      "attributes": {
+        "potential": "3-year contract",
+        "requirement": "solve integration problem"
+      },
+      "mentionCount": 2,
+      "confidence": 0.85
+    }
+  ],
+  
+  "relationships": [
+    {
+      "id": "rel_1",
+      "participants": ["ent_sarah_chen", "ent_marcus_webb"],
+      "type": "colleagues",
+      "strength": 0.8,
+      "sentiment": 0.6,
+      "evidence": "Direct report, active collaboration on decisions"
+    },
+    {
+      "id": "rel_2",
+      "participants": ["ent_marcus_webb", "ent_james_okonkwo"],
+      "type": "rivals",
+      "strength": 0.7,
+      "sentiment": -0.4,
+      "evidence": "Tension over infrastructure decision, mediation scheduled"
+    },
+    {
+      "id": "rel_3",
+      "participants": ["ent_sarah_chen", "ent_priya_sharma"],
+      "type": "colleagues",
+      "strength": 0.8,
+      "sentiment": 0.5,
+      "evidence": "Direct report, private conversations about concerns"
+    },
+    {
+      "id": "rel_4",
+      "participants": ["ent_sarah_chen", "ent_richard_hartley"],
+      "type": "mentor-mentee",
+      "strength": 0.5,
+      "sentiment": 0.3,
+      "evidence": "External advisor, but currently disengaged"
+    },
+    {
+      "id": "rel_5",
+      "participants": ["ent_project_meridian", "ent_nexus_labs"],
+      "type": "adversaries",
+      "strength": 0.6,
+      "sentiment": -0.5,
+      "evidence": "Direct competition in ML space"
+    }
+  ],
+  
+  "themes": [
+    {
+      "id": "theme_1",
+      "name": "Infrastructure Decision Crisis",
+      "description": "Urgent decision needed on edge computing migration with team disagreement",
+      "weight": 0.9,
+      "relatedEntities": ["ent_marcus_webb", "ent_james_okonkwo", "ent_edge_migration"]
+    },
+    {
+      "id": "theme_2",
+      "name": "Technical Debt Concerns",
+      "description": "Accumulating tech debt threatening launch stability",
+      "weight": 0.7,
+      "relatedEntities": ["ent_priya_sharma", "ent_tech_debt"]
+    },
+    {
+      "id": "theme_3",
+      "name": "Competitive Pressure",
+      "description": "Nexus Labs emergence as threat, IP concerns",
+      "weight": 0.6,
+      "relatedEntities": ["ent_nexus_labs", "ent_diana_reyes"]
+    },
+    {
+      "id": "theme_4",
+      "name": "Advisor Disengagement",
+      "description": "Prof. Hartley's unusual silence raises questions",
+      "weight": 0.5,
+      "relatedEntities": ["ent_richard_hartley", "ent_sarah_chen"]
+    },
+    {
+      "id": "theme_5",
+      "name": "Enterprise Opportunity",
+      "description": "Major contract possibility contingent on solving integration",
+      "weight": 0.6,
+      "relatedEntities": ["ent_lisa_park", "ent_enterprise_prospect"]
+    }
+  ],
+  
+  "suggestedTensions": [
+    {
+      "type": "conflict",
+      "participants": ["ent_marcus_webb", "ent_james_okonkwo"],
+      "description": "Infrastructure migration disagreement escalating",
+      "intensity": 0.8
+    },
+    {
+      "type": "secret",
+      "participants": ["ent_priya_sharma"],
+      "description": "Private concerns about building on unstable foundation",
+      "intensity": 0.6
+    },
+    {
+      "type": "mystery",
+      "participants": ["ent_richard_hartley"],
+      "description": "Why has the advisor gone silent?",
+      "intensity": 0.5
+    },
+    {
+      "type": "opportunity",
+      "participants": ["ent_lisa_park", "ent_enterprise_prospect"],
+      "description": "Game-changing contract if integration solved",
+      "intensity": 0.7
+    },
+    {
+      "type": "competition",
+      "participants": ["ent_project_meridian", "ent_nexus_labs"],
+      "description": "Emerging competitor with aggressive marketing",
+      "intensity": 0.6
+    }
+  ],
+  
+  "suggestedExtrinsicCharacters": [
+    {
+      "archetype": "skeptic",
+      "rationale": "Challenge the team's optimism about algorithm performance"
+    },
+    {
+      "archetype": "newsletter_curator",
+      "rationale": "TechPulse Weekly mentioned - could comment on Nexus Labs news"
+    },
+    {
+      "archetype": "spammer",
+      "rationale": "Edge computing, ML, infrastructure keywords make good spam fodder"
+    },
+    {
+      "archetype": "outsider",
+      "rationale": "Industry observer curious about the Meridian/Nexus competition"
+    }
+  ]
+}
