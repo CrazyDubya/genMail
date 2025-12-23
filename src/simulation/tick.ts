@@ -367,6 +367,7 @@ async function generateEmail(
 
   // Generate using character's bound model
   let body: string;
+  let usedFallback = false;
   try {
     body = await router.generateAsCharacter(sender.id, prompt, {
       threadSubject: thread.subject,
@@ -375,9 +376,16 @@ async function generateEmail(
       characterKnowledge: sender.knows,
     });
   } catch (error) {
-    // Fallback to simple message
-    console.error('Email generation failed:', error);
+    // Fallback to varied template-based message
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.warn(`[Email Generation] LLM failed for ${sender.name} (${sender.archetype}), using fallback. Error: ${errorMsg}`);
     body = generateFallbackEmail(sender, event);
+    usedFallback = true;
+  }
+
+  // Log generation method for debugging
+  if (usedFallback) {
+    console.log(`[Email Generation] Generated fallback email for ${sender.name} (${sender.archetype})`);
   }
 
   // Determine folder
@@ -483,18 +491,139 @@ function getEmailType(sender: Character, event: PlannedEvent): Email['type'] {
 function generateFallbackEmail(sender: Character, event: PlannedEvent): string {
   const greetings = sender.voiceBinding.voiceProfile.greetingPatterns;
   const signoffs = sender.voiceBinding.voiceProfile.signoffPatterns;
+  const quirks = sender.voiceBinding.voiceProfile.quirks;
+  const vocab = sender.voiceBinding.voiceProfile.vocabulary;
 
-  const greeting = greetings[0] ?? 'Hi';
-  const signoff = signoffs[0] ?? 'Best';
+  // Pick random greeting and signoff for variety
+  const greeting = greetings[Math.floor(Math.random() * greetings.length)] ?? 'Hi';
+  const signoff = signoffs[Math.floor(Math.random() * signoffs.length)] ?? 'Best';
+
+  // Generate content based on archetype
+  const body = generateArchetypeSpecificBody(sender, event, vocab, quirks);
 
   return `${greeting},
 
-I wanted to reach out about ${event.description.toLowerCase()}.
-
-Let me know your thoughts.
+${body}
 
 ${signoff},
 ${sender.name}`;
+}
+
+function generateArchetypeSpecificBody(
+  sender: Character,
+  event: PlannedEvent,
+  vocab: string[],
+  quirks: string[]
+): string {
+  const topic = event.description.toLowerCase();
+  const randomVocab = vocab.length > 0 ? vocab[Math.floor(Math.random() * vocab.length)] : '';
+  const hasQuirk = quirks.length > 0 && Math.random() > 0.5;
+  const quirk = hasQuirk ? ` ${quirks[Math.floor(Math.random() * quirks.length)]}` : '';
+
+  // Newsletter curator - detailed, informative content
+  if (sender.archetype === 'newsletter_curator') {
+    const sections = [
+      `This week has been eventful! Here's what's happening with ${topic}.`,
+      `We've got some exciting updates to share regarding ${topic}.`,
+      `Time for your regular briefing on ${topic}.`,
+    ];
+    const details = [
+      `Several developments have caught our attention. The team has been working hard on key initiatives, and we're seeing real progress.`,
+      `Things are moving forward nicely. We've hit some milestones and there's momentum building.`,
+      `There's been good activity across the board. Multiple projects are advancing and new opportunities are emerging.`,
+    ];
+    const closings = [
+      `Stay tuned for more updates next week. As always, reach out if you have questions.`,
+      `More to come soon. Keep an eye out for announcements.`,
+      `That's all for now. Looking forward to sharing more progress with you.`,
+    ];
+    return `${sections[Math.floor(Math.random() * sections.length)]}
+
+${details[Math.floor(Math.random() * details.length)]}
+
+${closings[Math.floor(Math.random() * closings.length)]}${quirk}`;
+  }
+
+  // Spammer - promotional, urgent
+  if (sender.archetype === 'spammer') {
+    const openers = [
+      `Don't miss out on this LIMITED TIME opportunity!`,
+      `URGENT: This offer expires SOON!`,
+      `You've been specially selected for an exclusive deal!`,
+      `Act NOW before it's too late!`,
+    ];
+    const bodies = [
+      `Our team has identified you as someone who deserves the BEST. Click now to claim your special reward!`,
+      `Thousands are already benefiting from this amazing offer. Why aren't you?`,
+      `This is your FINAL NOTICE. The opportunity of a lifetime awaits!`,
+      `We're practically GIVING this away. But only for the next 24 hours!`,
+    ];
+    const ctas = [
+      `Reply NOW to secure your spot!`,
+      `Don't let this slip away - respond TODAY!`,
+      `Time is running out. Act immediately!`,
+    ];
+    return `${openers[Math.floor(Math.random() * openers.length)]}
+
+${bodies[Math.floor(Math.random() * bodies.length)]}
+
+${ctas[Math.floor(Math.random() * ctas.length)]}`;
+  }
+
+  // Protagonist - confident, driving action
+  if (sender.archetype === 'protagonist') {
+    const templates = [
+      `I've been thinking about ${topic} and I believe we need to take action. Let me outline my thoughts and get your perspective on how we move forward.`,
+      `Regarding ${topic} - I've put together some ideas. I think we have a real opportunity here if we approach this right.${quirk}`,
+      `I wanted to connect about ${topic}. There's some important ground to cover and I'd value your input on the direction we should take.`,
+      `Quick note on ${topic}. I've been working on this and have some concrete proposals to share. Would love to discuss when you have a moment.`,
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
+
+  // Antagonist - challenging, questioning
+  if (sender.archetype === 'antagonist') {
+    const templates = [
+      `I have concerns about ${topic}. Before we proceed, I think we need to reconsider some assumptions. I'm not convinced we're on the right track.`,
+      `Regarding ${topic} - I've reviewed this carefully and I see some significant issues we haven't addressed. We should talk.${quirk}`,
+      `I need to raise some objections about ${topic}. I know this might not be what you want to hear, but someone has to say it.`,
+      `I'm pushing back on ${topic}. The current approach has problems and I think we need a different perspective here.`,
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
+
+  // Skeptic - cautious, analytical
+  if (sender.archetype === 'skeptic') {
+    const templates = [
+      `I've been looking into ${topic} and I have some questions. Have we fully considered all the implications? I'd like to see more data.`,
+      `On ${topic} - I'm not entirely sold yet. What's the evidence supporting this direction? I want to make sure we're not missing something.${quirk}`,
+      `Before we commit to ${topic}, can we review the assumptions? I've found a few things that warrant closer examination.`,
+      `I'm taking a careful look at ${topic}. There are some aspects that don't quite add up for me. Can we discuss?`,
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
+
+  // Enthusiast - excited, positive
+  if (sender.archetype === 'enthusiast') {
+    const templates = [
+      `I'm really excited about ${topic}! This could be exactly what we need. I have so many ideas and can't wait to get started!`,
+      `Great news about ${topic}! I've been thinking about this and I see so much potential here. Let's make this happen!${quirk}`,
+      `Love the direction with ${topic}! This is going to be amazing. I'm all in and ready to contribute however I can!`,
+      `${randomVocab ? randomVocab + '! ' : ''}The ${topic} stuff is fantastic! I'm genuinely pumped about where this could go.`,
+    ];
+    return templates[Math.floor(Math.random() * templates.length)];
+  }
+
+  // Default - professional, neutral
+  const defaultTemplates = [
+    `I wanted to touch base about ${topic}. Let me know your thoughts when you have a chance.${quirk}`,
+    `Following up on ${topic}. Would be good to sync up on this soon.`,
+    `Quick note regarding ${topic}. I have some updates to share and would appreciate your input.`,
+    `Reaching out about ${topic}. There are a few things we should discuss.`,
+    `Wanted to check in on ${topic}. Let me know if you have time to connect.`,
+    `I've been working on ${topic} and wanted to loop you in. Happy to discuss further.`,
+  ];
+  return defaultTemplates[Math.floor(Math.random() * defaultTemplates.length)];
 }
 
 // =============================================================================

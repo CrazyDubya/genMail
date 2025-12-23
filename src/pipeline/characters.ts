@@ -438,8 +438,10 @@ Respond with JSON:
     return character;
   } catch (error) {
     console.error('Character generation failed:', error);
-    // Return basic character on failure
-    return createBasicCharacter(entity.name, 'unknown');
+    // Return basic character on failure - but ensure it's bound to the router
+    const basicChar = createBasicCharacter(entity.name, 'unknown');
+    router.bindCharacter(basicChar.id, basicChar.voiceBinding.modelId, basicChar.voiceBinding.voiceProfile);
+    return basicChar;
   }
 }
 
@@ -546,7 +548,10 @@ Respond with JSON:
     return character;
   } catch (error) {
     console.error('Extrinsic character generation failed:', error);
-    return createBasicCharacter(name, archetype);
+    // Return basic character on failure - but ensure it's bound to the router
+    const basicChar = createBasicCharacter(name, archetype);
+    router.bindCharacter(basicChar.id, basicChar.voiceBinding.modelId, basicChar.voiceBinding.voiceProfile);
+    return basicChar;
   }
 }
 

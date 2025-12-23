@@ -479,7 +479,13 @@ export class ModelRouter {
       };
     }
 
-    console.log(`[ModelRouter] Initialized with models: ${this.getAvailableModels().join(', ')}`);
+    const availableModels = this.getAvailableModels();
+    if (availableModels.length === 0) {
+      console.warn('[ModelRouter] WARNING: No API keys configured! All email generation will use fallback templates.');
+      console.warn('[ModelRouter] Set environment variables: ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_AI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY');
+    } else {
+      console.log(`[ModelRouter] Initialized with models: ${availableModels.join(', ')}`);
+    }
   }
 
   /**
