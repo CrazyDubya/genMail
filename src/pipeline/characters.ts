@@ -2,6 +2,9 @@
  * Character Generation Pipeline
  *
  * Generates deep characters from extracted entities and archetypes.
+ *
+ * NEW: Characters now receive actual document knowledge via the
+ * generateCharacterKnowledge function, solving the empty knows[] problem.
  */
 
 import { v4 as uuid } from 'uuid';
@@ -15,8 +18,11 @@ import type {
   ExtractedEntity,
   Theme,
   ModelIdentifier,
+  DocumentContext,
+  ExtractedConcept,
 } from '../types.js';
 import type { ModelRouter } from '../models/router.js';
+import { generateCharacterKnowledge } from './understanding.js';
 
 // =============================================================================
 // ARCHETYPE TEMPLATES
@@ -320,11 +326,15 @@ function generateEmail(name: string): string {
 
 /**
  * Generate an intrinsic character from an extracted entity.
+ *
+ * NEW: Now accepts DocumentContext and concepts to populate knows[].
  */
 export async function generateIntrinsicCharacter(
   entity: ExtractedEntity,
   themes: Theme[],
-  router: ModelRouter
+  router: ModelRouter,
+  context?: DocumentContext,
+  concepts?: ExtractedConcept[]
 ): Promise<Character> {
   const id = uuid() as CharacterId;
 
@@ -428,18 +438,22 @@ Respond with JSON:
         typicalLength: 'moderate',
         threadParticipation: 'mixed',
       },
-      knows: [],
+      // NEW: Populate knows[] with actual document knowledge
+      knows: context && concepts
+        ? generateCharacterKnowledge('protagonist', context, concepts)
+        : [],
       suspects: [],
     };
 
     // Bind to model
     router.bindCharacter(id, character.voiceBinding.modelId, voiceProfile);
 
+    console.log(`[Character Generation] Created intrinsic character "${character.name}" with ${character.knows.length} knowledge items`);
     return character;
   } catch (error) {
     console.error('Character generation failed:', error);
     // Return basic character on failure - but ensure it's bound to the router
-    const basicChar = createBasicCharacter(entity.name, 'unknown');
+    const basicChar = createBasicCharacter(entity.name, 'unknown', context, concepts);
     router.bindCharacter(basicChar.id, basicChar.voiceBinding.modelId, basicChar.voiceBinding.voiceProfile);
     return basicChar;
   }
@@ -447,11 +461,15 @@ Respond with JSON:
 
 /**
  * Generate an extrinsic character from an archetype.
+ *
+ * NEW: Now accepts DocumentContext and concepts to populate knows[].
  */
 export async function generateExtrinsicCharacter(
   archetype: CharacterArchetype,
   themes: Theme[],
-  router: ModelRouter
+  router: ModelRouter,
+  context?: DocumentContext,
+  concepts?: ExtractedConcept[]
 ): Promise<Character> {
   const template = ARCHETYPE_TEMPLATES[archetype];
   const id = uuid() as CharacterId;
@@ -538,18 +556,22 @@ Respond with JSON:
         },
       },
       emailBehavior: template.emailBehavior,
-      knows: [],
+      // NEW: Populate knows[] with archetype-specific document knowledge
+      knows: context && concepts
+        ? generateCharacterKnowledge(archetype, context, concepts)
+        : [],
       suspects: [],
     };
 
     // Bind to model
     router.bindCharacter(id, character.voiceBinding.modelId, voiceProfile);
 
+    console.log(`[Character Generation] Created extrinsic character "${character.name}" (${archetype}) with ${character.knows.length} knowledge items`);
     return character;
   } catch (error) {
     console.error('Extrinsic character generation failed:', error);
     // Return basic character on failure - but ensure it's bound to the router
-    const basicChar = createBasicCharacter(name, archetype);
+    const basicChar = createBasicCharacter(name, archetype, context, concepts);
     router.bindCharacter(basicChar.id, basicChar.voiceBinding.modelId, basicChar.voiceBinding.voiceProfile);
     return basicChar;
   }
@@ -597,8 +619,15 @@ Write ONLY the email body, no subject or headers.`;
 
 /**
  * Create a basic character as fallback.
+ *
+ * NEW: Now accepts context and concepts to populate knows[].
  */
-function createBasicCharacter(name: string, archetype: string): Character {
+function createBasicCharacter(
+  name: string,
+  archetype: string,
+  context?: DocumentContext,
+  concepts?: ExtractedConcept[]
+): Character {
   const id = uuid() as CharacterId;
 
   const voiceProfile: VoiceProfile = {
@@ -637,7 +666,10 @@ function createBasicCharacter(name: string, archetype: string): Character {
       typicalLength: 'moderate',
       threadParticipation: 'mixed',
     },
-    knows: [],
+    // NEW: Even fallback characters get document knowledge
+    knows: context && concepts
+      ? generateCharacterKnowledge(archetype || 'newcomer', context, concepts)
+      : [],
     suspects: [],
   };
 }
@@ -648,14 +680,23 @@ function createBasicCharacter(name: string, archetype: string): Character {
 
 /**
  * Generate all characters for a universe.
+ *
+ * NEW: Now accepts DocumentContext and concepts to populate character knowledge.
  */
 export async function generateCharacters(
   entities: ExtractedEntity[],
   themes: Theme[],
   config: { min: number; max: number; archetypes: CharacterArchetype[] },
-  router: ModelRouter
+  router: ModelRouter,
+  context?: DocumentContext,
+  concepts?: ExtractedConcept[]
 ): Promise<Character[]> {
   const characters: Character[] = [];
+
+  console.log(`[Character Generation] Starting with ${entities.length} entities, ${themes.length} themes`);
+  if (context) {
+    console.log(`[Character Generation] Document context available: "${context.thesis.slice(0, 50)}..."`);
+  }
 
   // Generate intrinsic characters from person entities
   const personEntities = entities
@@ -664,7 +705,7 @@ export async function generateCharacters(
     .slice(0, Math.ceil(config.max / 2));
 
   for (const entity of personEntities) {
-    const character = await generateIntrinsicCharacter(entity, themes, router);
+    const character = await generateIntrinsicCharacter(entity, themes, router, context, concepts);
     characters.push(character);
   }
 
@@ -685,9 +726,12 @@ export async function generateCharacters(
   ].slice(0, neededExtrinsic) as CharacterArchetype[];
 
   for (const archetype of archetypesToUse) {
-    const character = await generateExtrinsicCharacter(archetype, themes, router);
+    const character = await generateExtrinsicCharacter(archetype, themes, router, context, concepts);
     characters.push(character);
   }
+
+  const totalKnowledge = characters.reduce((sum, c) => sum + c.knows.length, 0);
+  console.log(`[Character Generation] Created ${characters.length} characters with ${totalKnowledge} total knowledge items`);
 
   return characters.slice(0, config.max);
 }

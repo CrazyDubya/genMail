@@ -441,6 +441,14 @@ function buildEmailPrompt(
 ): string {
   const recipientNames = recipients.map((r) => r.name).join(', ');
 
+  // NEW: Get document context if available
+  const docContext = world.documents[0]?.context;
+  const documentThesis = docContext?.thesis ?? '';
+  const documentSignificance = docContext?.significance ?? '';
+
+  // NEW: Include sender's actual knowledge
+  const senderKnowledge = sender.knows.slice(0, 5).join('\n- ');
+
   let contextInfo = '';
 
   // Add tension context
@@ -460,11 +468,25 @@ function buildEmailPrompt(
   // Special handling for archetypes
   if (sender.archetype === 'newsletter_curator') {
     const themes = world.documents.flatMap((d) => d.themes).slice(0, 3);
-    return `Write a newsletter email about these topics:
+    const concepts = world.documents.flatMap((d) => d.concepts ?? []).slice(0, 5);
+
+    return `Write a newsletter email about this document.
+
+DOCUMENT OVERVIEW:
+${documentThesis}
+
+KEY TOPICS:
 ${themes.map((t) => `- ${t.name}: ${t.description}`).join('\n')}
 
-Keep it informative, well-structured with sections, and engaging.
-Length: 150-250 words.`;
+KEY CONCEPTS TO DISCUSS:
+${concepts.map((c) => `- ${c.name}: ${c.definition.slice(0, 100)}...`).join('\n')}
+
+Write an informative newsletter that:
+- Explains the main thesis in accessible terms
+- Highlights 2-3 key concepts with real substance
+- Discusses why this matters (${documentSignificance.slice(0, 100)})
+
+Keep it well-structured with sections. Length: 200-300 words.`;
   }
 
   if (sender.archetype === 'spammer') {
@@ -472,15 +494,24 @@ Length: 150-250 words.`;
 Include vague urgency and a call to action. Length: 50-100 words.`;
   }
 
+  // NEW: Enhanced prompt with document context and character knowledge
   return `Write an email to ${recipientNames}.
 Subject: ${subject}
 ${contextInfo}
 
+DOCUMENT CONTEXT (what you're discussing):
+${documentThesis.slice(0, 300)}
+
+YOUR KNOWLEDGE (use this in the email):
+- ${senderKnowledge || 'General understanding of the topic'}
+
 ${previousMessages.length > 0 ? `This is a reply in an ongoing thread.\n` : 'This is a new email.\n'}
 
-Based on the event: ${event.description}
+Event: ${event.description}
 
-Write a natural, conversational email. Length: 50-150 words.`;
+IMPORTANT: Reference SPECIFIC concepts from your knowledge. Don't be vague or generic.
+Write a natural, conversational email that demonstrates actual understanding of the subject matter.
+Length: 75-200 words.`;
 }
 
 function getEmailType(sender: Character, event: PlannedEvent): Email['type'] {

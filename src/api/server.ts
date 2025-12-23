@@ -633,7 +633,15 @@ async function generateUniverse(
     const allEntities = processedDocs.flatMap((d) => d.extractedEntities);
     const allThemes = processedDocs.flatMap((d) => d.themes);
 
-    console.log(`[Generation ${universeId.slice(0, 8)}] Found ${allEntities.length} entities, ${allThemes.length} themes`);
+    // NEW: Collect document context and concepts for character knowledge
+    const allConcepts = processedDocs.flatMap((d) => d.concepts ?? []);
+    // Use first document's context as primary (most relevant for character knowledge)
+    const primaryContext = processedDocs[0]?.context;
+
+    console.log(`[Generation ${universeId.slice(0, 8)}] Found ${allEntities.length} entities, ${allThemes.length} themes, ${allConcepts.length} concepts`);
+    if (primaryContext) {
+      console.log(`[Generation ${universeId.slice(0, 8)}] Document thesis: "${primaryContext.thesis.slice(0, 80)}..."`);
+    }
 
     await updateProgress('characters', 35, 'Generating characters', `Creating ${config.characterCount.min}-${config.characterCount.max} characters...`, 0, config.characterCount.max);
 
@@ -645,7 +653,9 @@ async function generateUniverse(
         max: config.characterCount.max,
         archetypes: config.extrinsicArchetypes,
       },
-      ctx.router
+      ctx.router,
+      primaryContext,  // NEW: Pass document context
+      allConcepts      // NEW: Pass concepts for character knowledge
     );
 
     await updateProgress('characters', 45, 'Generating characters', 'Saving characters...', characters.length, characters.length);

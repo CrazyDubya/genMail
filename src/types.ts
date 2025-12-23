@@ -66,7 +66,12 @@ export interface RawDocument {
 export interface ProcessedDocument {
   id: DocumentId;
   raw: RawDocument;
+  /** Document-level understanding (thesis, structure, significance) */
+  context: DocumentContext;
   chunks: DocumentChunk[];
+  /** Concepts extracted WITH document context (replaces shallow entity extraction) */
+  concepts: ExtractedConcept[];
+  /** Legacy entity extraction (kept for compatibility) */
   extractedEntities: ExtractedEntity[];
   themes: Theme[];
   processingMetadata: {
@@ -83,6 +88,10 @@ export interface DocumentChunk {
   startOffset: number;
   endOffset: number;
   tokenEstimate: number;
+  /** Which section this chunk belongs to (if structure detected) */
+  sectionTitle?: string;
+  /** Index within the document for ordering */
+  chunkIndex: number;
 }
 
 // ============================================================================
@@ -111,6 +120,91 @@ export interface Theme {
   description: string;
   relevantChunks: string[];
   weight: number;
+}
+
+// ============================================================================
+// DOCUMENT UNDERSTANDING (Concept-First Extraction)
+// ============================================================================
+
+export type DocumentType =
+  | 'academic_paper'
+  | 'technical_doc'
+  | 'article'
+  | 'book_chapter'
+  | 'transcript'
+  | 'email_thread'
+  | 'report'
+  | 'unknown';
+
+export interface DocumentContext {
+  /** What type of document is this? */
+  documentType: DocumentType;
+  /** One-paragraph summary of the document's main point */
+  thesis: string;
+  /** Extended summary with key details (500-800 words) */
+  summary: string;
+  /** The main argument or narrative structure */
+  argumentStructure: ArgumentPoint[];
+  /** Core concepts that define this document */
+  coreConcepts: string[];
+  /** Detected sections/structure */
+  structure: DocumentSection[];
+  /** Key claims made and their evidence */
+  claims: Claim[];
+  /** What makes this document significant/novel */
+  significance: string;
+}
+
+export interface ArgumentPoint {
+  point: string;
+  supporting: string[];
+  order: number;
+}
+
+export interface DocumentSection {
+  title: string;
+  startOffset: number;
+  endOffset: number;
+  summary?: string;
+}
+
+export interface Claim {
+  statement: string;
+  evidence: string[];
+  confidence: number;
+}
+
+export interface ExtractedConcept {
+  id: string;
+  /** The concept name */
+  name: string;
+  /** What this concept means IN THIS DOCUMENT'S CONTEXT */
+  definition: string;
+  /** Why this concept matters to the document's thesis */
+  roleInDocument: string;
+  /** How it relates to other concepts */
+  relationships: ConceptRelationship[];
+  /** Specific details, formulas, examples from the text */
+  details: string[];
+  /** Which chunks this concept appears in */
+  sourceChunks: string[];
+  /** Importance to overall document (0-1) */
+  importance: number;
+}
+
+export interface ConceptRelationship {
+  targetConcept: string;
+  relationshipType: 'is-a' | 'part-of' | 'uses' | 'enables' | 'contrasts-with' | 'extends' | 'implements' | 'requires';
+  description: string;
+}
+
+export interface ConceptHierarchy {
+  /** Root concepts (top-level ideas) */
+  roots: string[];
+  /** Parent-child relationships */
+  hierarchy: Map<string, string[]>;
+  /** Cross-cutting relationships */
+  crossLinks: Array<{ from: string; to: string; type: string }>;
 }
 
 // ============================================================================
