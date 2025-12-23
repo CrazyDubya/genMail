@@ -44,10 +44,20 @@ interface GenerationJob {
     phase: 'documents' | 'characters' | 'simulation' | 'complete';
     percentComplete: number;
     currentTask?: string;
+    subTask?: string;
+    itemsProcessed?: number;
+    itemsTotal?: number;
   };
   error?: string;
+  errorDetails?: string;
   startedAt: Date;
   completedAt?: Date;
+  cost?: {
+    totalCost: number;
+    totalTokens: number;
+    callCount: number;
+  };
+  lastActivityAt?: Date;
 }
 
 const app = new Hono();
@@ -169,12 +179,29 @@ app.get('/api/universe/:id/status', async (c) => {
     };
   }
 
-  const response: UniverseStatusResponse = {
+  // Calculate elapsed time
+  const elapsedMs = Date.now() - job.startedAt.getTime();
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+
+  // Get current cost from router
+  const usage = ctx.router.getCumulativeUsage();
+
+  const response = {
     universeId: id,
     status: job.status,
-    progress: job.progress,
+    progress: {
+      ...job.progress,
+      elapsedSeconds: elapsedSec,
+    },
     stats,
     error: job.error,
+    errorDetails: job.errorDetails,
+    cost: {
+      totalCost: usage.totalCost,
+      totalTokens: usage.totalInputTokens + usage.totalOutputTokens,
+      callCount: usage.callCount,
+    },
+    lastActivityAt: job.lastActivityAt?.toISOString(),
   };
 
   return c.json(response);
@@ -364,14 +391,26 @@ async function generateUniverse(
 ): Promise<void> {
   const job = ctx.generationJobs.get(universeId)!;
 
+  // Helper to update progress with activity timestamp
+  const updateProgress = async (
+    phase: GenerationJob['progress']['phase'],
+    percentComplete: number,
+    currentTask: string,
+    subTask?: string,
+    itemsProcessed?: number,
+    itemsTotal?: number
+  ) => {
+    job.progress = { phase, percentComplete, currentTask, subTask, itemsProcessed, itemsTotal };
+    job.lastActivityAt = new Date();
+    await ctx.storage.updateUniverseStatus(universeId, job.progress);
+    console.log(`[Generation ${universeId.slice(0, 8)}] ${percentComplete}% - ${currentTask}${subTask ? `: ${subTask}` : ''}`);
+  };
+
   try {
     // Phase 1: Process documents
-    job.progress = {
-      phase: 'documents',
-      percentComplete: 10,
-      currentTask: 'Chunking and extracting entities',
-    };
-    await ctx.storage.updateUniverseStatus(universeId, job.progress);
+    await updateProgress('documents', 5, 'Processing documents', 'Initializing...', 0, documents.length);
+
+    console.log(`[Generation ${universeId.slice(0, 8)}] Starting with ${documents.length} document(s)`);
 
     const rawDocs: RawDocument[] = documents.map((d) => ({
       id: uuid() as DocumentId,
@@ -381,24 +420,27 @@ async function generateUniverse(
       uploadedAt: new Date(),
     }));
 
+    await updateProgress('documents', 10, 'Processing documents', 'Chunking and extracting entities...', 0, rawDocs.length);
+
     const processedDocs = await processDocuments(rawDocs, ctx.router);
+
+    await updateProgress('documents', 20, 'Processing documents', 'Saving processed documents...', processedDocs.length, processedDocs.length);
 
     for (const doc of processedDocs) {
       await ctx.storage.saveDocument(universeId, doc);
     }
 
-    job.progress.percentComplete = 30;
+    await updateProgress('documents', 30, 'Processing documents', 'Document processing complete', processedDocs.length, processedDocs.length);
 
     // Phase 2: Generate characters
-    job.progress = {
-      phase: 'characters',
-      percentComplete: 35,
-      currentTask: 'Generating characters',
-    };
-    await ctx.storage.updateUniverseStatus(universeId, job.progress);
+    await updateProgress('characters', 32, 'Generating characters', 'Analyzing entities...', 0, 0);
 
     const allEntities = processedDocs.flatMap((d) => d.extractedEntities);
     const allThemes = processedDocs.flatMap((d) => d.themes);
+
+    console.log(`[Generation ${universeId.slice(0, 8)}] Found ${allEntities.length} entities, ${allThemes.length} themes`);
+
+    await updateProgress('characters', 35, 'Generating characters', `Creating ${config.characterCount.min}-${config.characterCount.max} characters...`, 0, config.characterCount.max);
 
     const characters = await generateCharacters(
       allEntities,
@@ -411,16 +453,21 @@ async function generateUniverse(
       ctx.router
     );
 
+    await updateProgress('characters', 45, 'Generating characters', 'Saving characters...', characters.length, characters.length);
+
     for (const char of characters) {
       await ctx.storage.saveCharacter(universeId, char);
     }
 
-    job.progress.percentComplete = 50;
+    console.log(`[Generation ${universeId.slice(0, 8)}] Created ${characters.length} characters`);
 
     // Infer relationships
-    job.progress.currentTask = 'Inferring relationships';
+    await updateProgress('characters', 48, 'Building relationships', 'Inferring character relationships...', 0, characters.length);
+
     const allChunks = processedDocs.flatMap((d) => d.chunks);
     const relationships = await inferRelationships(allEntities, allChunks, ctx.router);
+
+    await updateProgress('characters', 52, 'Building relationships', `Saving ${relationships.length} relationships...`, relationships.length, relationships.length);
 
     for (const rel of relationships) {
       await ctx.storage.saveRelationship(universeId, {
@@ -433,20 +480,19 @@ async function generateUniverse(
     }
 
     // Initialize tensions
+    await updateProgress('characters', 55, 'Initializing tensions', 'Creating dramatic tensions...', 0, 0);
+
     const tensions = await initializeTensions(allThemes, characters, ctx.router);
     for (const tension of tensions) {
       await ctx.storage.saveTension(universeId, tension);
     }
 
-    job.progress.percentComplete = 60;
+    await updateProgress('characters', 60, 'Character setup complete', `${characters.length} characters, ${relationships.length} relationships, ${tensions.length} tensions`, 0, 0);
+
+    console.log(`[Generation ${universeId.slice(0, 8)}] Created ${tensions.length} tensions`);
 
     // Phase 3: Run simulation
-    job.progress = {
-      phase: 'simulation',
-      percentComplete: 65,
-      currentTask: 'Generating emails',
-    };
-    await ctx.storage.updateUniverseStatus(universeId, job.progress);
+    await updateProgress('simulation', 62, 'Running simulation', 'Initializing world state...', 0, config.targetEmailCount);
 
     // Get full world state
     const storedRelationships = await ctx.storage.getRelationships(universeId);
@@ -471,6 +517,9 @@ async function generateUniverse(
       config,
     };
 
+    await updateProgress('simulation', 65, 'Running simulation', 'Starting email generation...', 0, config.targetEmailCount);
+
+    let totalEmailsGenerated = 0;
     const { world: finalWorld } = await runSimulation(
       worldState,
       ctx.router,
@@ -478,19 +527,29 @@ async function generateUniverse(
         targetEmails: config.targetEmailCount,
         timeoutMs: 5 * 60 * 1000, // 5 minute timeout
         onTick: async (result) => {
-          const emailCount = finalWorld?.emails.length ?? result.newEmails.length;
+          totalEmailsGenerated += result.newEmails.length;
+          const emailCount = totalEmailsGenerated;
           const progress = Math.min(95, 65 + (emailCount / config.targetEmailCount) * 30);
-          job.progress = {
-            phase: 'simulation',
-            percentComplete: Math.round(progress),
-            currentTask: `Generated ${emailCount} emails`,
-          };
-          await ctx.storage.updateUniverseStatus(universeId, job.progress);
+          const usage = ctx.router.getCumulativeUsage();
+          await updateProgress(
+            'simulation',
+            Math.round(progress),
+            'Generating emails',
+            `${emailCount}/${config.targetEmailCount} emails generated`,
+            emailCount,
+            config.targetEmailCount
+          );
+          // Log cost periodically
+          if (emailCount % 10 === 0) {
+            console.log(`[Generation ${universeId.slice(0, 8)}] Cost so far: $${usage.totalCost.toFixed(4)} (${usage.callCount} API calls)`);
+          }
         },
       }
     );
 
     // Save all generated content
+    await updateProgress('simulation', 96, 'Saving results', 'Saving emails...', finalWorld.emails.length, finalWorld.emails.length);
+
     for (const email of finalWorld.emails) {
       await ctx.storage.saveEmail(universeId, email);
     }
@@ -500,6 +559,8 @@ async function generateUniverse(
     }
 
     // Build and save threads
+    await updateProgress('simulation', 97, 'Saving results', 'Building email threads...', 0, 0);
+
     const threadMap = new Map<string, Email[]>();
     for (const email of finalWorld.emails) {
       const existing = threadMap.get(email.threadId) ?? [];
@@ -523,23 +584,59 @@ async function generateUniverse(
     }
 
     // Update world state
+    await updateProgress('simulation', 99, 'Finalizing', 'Updating world state...', 0, 0);
     await ctx.storage.updateUniverse(finalWorld);
+
+    // Get final cost summary
+    const finalUsage = ctx.router.getCumulativeUsage();
+    job.cost = {
+      totalCost: finalUsage.totalCost,
+      totalTokens: finalUsage.totalInputTokens + finalUsage.totalOutputTokens,
+      callCount: finalUsage.callCount,
+    };
 
     // Complete
     job.status = 'complete';
     job.progress = {
       phase: 'complete',
       percentComplete: 100,
-      currentTask: 'Done',
+      currentTask: 'Generation complete',
+      subTask: `${finalWorld.emails.length} emails, ${threadMap.size} threads`,
     };
     job.completedAt = new Date();
+    job.lastActivityAt = new Date();
     await ctx.storage.updateUniverseStatus(universeId, job.progress);
 
-    console.log(`Universe ${universeId} generated: ${finalWorld.emails.length} emails`);
+    // Log final summary
+    console.log(`\n[Generation ${universeId.slice(0, 8)}] COMPLETE`);
+    console.log(`  Emails: ${finalWorld.emails.length}`);
+    console.log(`  Threads: ${threadMap.size}`);
+    console.log(`  Characters: ${characters.length}`);
+    console.log(`  Duration: ${((job.completedAt.getTime() - job.startedAt.getTime()) / 1000).toFixed(1)}s`);
+    console.log(ctx.router.getCostSummary());
+
   } catch (error) {
-    console.error('Generation error:', error);
+    const errorMessage = (error as Error).message;
+    const errorStack = (error as Error).stack;
+
+    console.error(`\n[Generation ${universeId.slice(0, 8)}] FAILED`);
+    console.error(`  Error: ${errorMessage}`);
+    console.error(`  Stack: ${errorStack}`);
+
+    // Log cost even on failure
+    const usage = ctx.router.getCumulativeUsage();
+    console.log(`  Cost incurred: $${usage.totalCost.toFixed(4)} (${usage.callCount} API calls)`);
+
     job.status = 'failed';
-    job.error = (error as Error).message;
+    job.error = errorMessage;
+    job.errorDetails = errorStack;
+    job.lastActivityAt = new Date();
+    job.cost = {
+      totalCost: usage.totalCost,
+      totalTokens: usage.totalInputTokens + usage.totalOutputTokens,
+      callCount: usage.callCount,
+    };
+
     throw error;
   }
 }
