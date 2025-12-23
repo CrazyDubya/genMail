@@ -89,6 +89,24 @@ export const MODEL_PRICING: Record<ModelIdentifier, ModelPricing> = {
     modelName: 'deepseek/deepseek-chat',
     provider: 'OpenRouter',
   },
+  'openrouter-gpt-nano': {
+    inputPerMillion: 0.10,
+    outputPerMillion: 0.50,
+    modelName: 'openai/gpt-5.2-nano',  // GPT-5.2 nano via OpenRouter
+    provider: 'OpenRouter',
+  },
+  'openrouter-haiku': {
+    inputPerMillion: 1.0,
+    outputPerMillion: 5.0,
+    modelName: 'anthropic/claude-3.5-haiku',  // Claude Haiku via OpenRouter
+    provider: 'OpenRouter',
+  },
+  'openrouter-flash': {
+    inputPerMillion: 0.60,
+    outputPerMillion: 3.50,
+    modelName: 'google/gemini-2.0-flash-exp',  // Gemini Flash via OpenRouter
+    provider: 'OpenRouter',
+  },
 };
 
 export interface UsageStats {
@@ -200,7 +218,8 @@ class OpenAIClient implements ModelClient {
             : []),
           { role: 'user', content: prompt },
         ],
-        max_tokens: options.maxTokens ?? 2048,
+        // Use max_completion_tokens for newer OpenAI models (GPT-4o+)
+        max_completion_tokens: options.maxTokens ?? 2048,
         temperature: options.temperature ?? 0.7,
         stop: options.stopSequences,
       }),
@@ -208,7 +227,8 @@ class OpenAIClient implements ModelClient {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`OpenAI API error: ${error}`);
+      const status = response.status;
+      throw new Error(`OpenAI API error (${status}): ${error}`);
     }
 
     const data = (await response.json()) as {
@@ -465,6 +485,19 @@ export class ModelRouter {
       this.clients.set(
         'openrouter-cheap',
         new OpenRouterClient(config.openrouter.apiKey, config.openrouter.defaultModel)
+      );
+      // Add OpenRouter fallback models for resilience
+      this.clients.set(
+        'openrouter-gpt-nano',
+        new OpenRouterClient(config.openrouter.apiKey, 'openai/gpt-5.2-nano', 'openrouter-gpt-nano')
+      );
+      this.clients.set(
+        'openrouter-haiku',
+        new OpenRouterClient(config.openrouter.apiKey, 'anthropic/claude-3.5-haiku', 'openrouter-haiku')
+      );
+      this.clients.set(
+        'openrouter-flash',
+        new OpenRouterClient(config.openrouter.apiKey, 'google/gemini-2.0-flash-exp', 'openrouter-flash')
       );
     }
 
@@ -801,6 +834,13 @@ Write ONLY the email content. Match the voice profile exactly. Do not include he
       } catch (error) {
         lastError = error as Error;
 
+        // For connection/availability errors, fail fast to trigger fallback
+        if (this.shouldFallback(error)) {
+          console.warn(`[ModelRouter] API unavailable for ${modelId}: ${lastError.message}`);
+          throw error; // Throw immediately to trigger fallback chain
+        }
+
+        // For rate limits, retry with backoff
         if (this.isRateLimitError(error)) {
           const backoff = this.getBackoffMs(modelId, i);
           console.warn(`[ModelRouter] Rate limited on ${modelId}, waiting ${backoff}ms (attempt ${i + 1}/${maxRetries})`);
@@ -808,7 +848,14 @@ Write ONLY the email content. Match the voice profile exactly. Do not include he
           continue;
         }
 
-        // Log non-rate-limit errors
+        // For other errors (parsing, unexpected), retry once then fail
+        if (i < 1) {
+          console.warn(`[ModelRouter] Retrying ${modelId} after error: ${lastError.message}`);
+          await this.sleep(1000);
+          continue;
+        }
+
+        // Log non-retryable errors
         console.error(`[ModelRouter] Error on ${modelId}: ${lastError.message}`);
         throw error;
       }
@@ -819,17 +866,46 @@ Write ONLY the email content. Match the voice profile exactly. Do not include he
 
   private isRateLimitError(error: unknown): boolean {
     if (error instanceof Error) {
+      const msg = error.message.toLowerCase();
       return (
-        error.message.includes('rate') ||
-        error.message.includes('429') ||
-        error.message.includes('quota')
+        msg.includes('rate') ||
+        msg.includes('429') ||
+        msg.includes('quota') ||
+        msg.includes('too many requests') ||
+        msg.includes('capacity')
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Determine if an error should trigger a fallback rather than retry.
+   * Returns true for errors that indicate the API is unavailable or the model
+   * is not accessible (auth errors, server errors, timeouts, etc.)
+   */
+  private shouldFallback(error: unknown): boolean {
+    if (error instanceof Error) {
+      const msg = error.message.toLowerCase();
+      return (
+        msg.includes('401') ||  // Unauthorized
+        msg.includes('403') ||  // Forbidden
+        msg.includes('404') ||  // Not found (model doesn't exist)
+        msg.includes('500') ||  // Server error
+        msg.includes('502') ||  // Bad gateway
+        msg.includes('503') ||  // Service unavailable
+        msg.includes('504') ||  // Gateway timeout
+        msg.includes('timeout') ||
+        msg.includes('econnrefused') ||
+        msg.includes('network') ||
+        msg.includes('fetch failed') ||
+        msg.includes('connection')
       );
     }
     return false;
   }
 
   private getBackoffMs(modelId: ModelIdentifier, attempt: number): number {
-    const baseMs: Record<ModelIdentifier, number> = {
+    const baseMs: Partial<Record<ModelIdentifier, number>> = {
       'claude-opus': 5000,
       'claude-sonnet': 3000,
       'claude-haiku': 2000,
@@ -837,22 +913,151 @@ Write ONLY the email content. Match the voice profile exactly. Do not include he
       'gemini-flash': 1000,
       'grok-fast': 2000,
       'openrouter-cheap': 1000,
+      'openrouter-gpt-nano': 1000,
+      'openrouter-haiku': 1000,
+      'openrouter-flash': 1000,
     };
 
     return (baseMs[modelId] ?? 2000) * Math.pow(2, attempt);
   }
 
+  /**
+   * Get the fallback model for a given model.
+   * Uses deep preference-based routing across ALL available providers.
+   * Any working API can stand in for another - Sonnet/Haiku can replace GPT,
+   * Gemini Flash can replace Claude, Grok can replace Gemini, etc.
+   */
   private getFallback(modelId: ModelIdentifier): ModelIdentifier | undefined {
-    const fallbacks: Partial<Record<ModelIdentifier, ModelIdentifier>> = {
-      'claude-opus': 'claude-sonnet',
-      'claude-sonnet': 'claude-haiku',
-      'claude-haiku': 'gpt-4o-mini',
-      'gpt-4o-mini': 'gemini-flash',
-      'gemini-flash': 'openrouter-cheap',
-      'grok-fast': 'gpt-4o-mini',
+    // Deep cross-provider fallback chains
+    // Priority: same-tier alternatives → cheaper direct APIs → OpenRouter equivalents → cheap fallbacks
+    const fallbacks: Partial<Record<ModelIdentifier, ModelIdentifier[]>> = {
+      // === CLAUDE CHAIN ===
+      // Opus → Sonnet → Haiku → GPT → Gemini → Grok → OpenRouter alternatives
+      'claude-opus': [
+        'claude-sonnet',
+        'gpt-4o-mini',        // GPT as mid-tier alternative
+        'gemini-flash',       // Gemini as alternative
+        'grok-fast',          // Grok as alternative
+        'openrouter-gpt-nano',
+        'openrouter-haiku',
+        'openrouter-flash',
+        'openrouter-cheap',
+      ],
+      'claude-sonnet': [
+        'claude-haiku',
+        'gpt-4o-mini',
+        'gemini-flash',
+        'grok-fast',
+        'openrouter-gpt-nano',
+        'openrouter-haiku',
+        'openrouter-flash',
+        'openrouter-cheap',
+      ],
+      'claude-haiku': [
+        'gpt-4o-mini',        // GPT nano is similar tier
+        'gemini-flash',       // Gemini Flash is similar tier
+        'grok-fast',          // Grok Fast is similar tier
+        'openrouter-gpt-nano',
+        'openrouter-haiku',
+        'openrouter-flash',
+        'openrouter-cheap',
+      ],
+
+      // === OPENAI CHAIN ===
+      // GPT → OpenRouter GPT nano → Claude Haiku → Gemini → Grok → other OpenRouter
+      'gpt-4o-mini': [
+        'openrouter-gpt-nano', // Same model via OpenRouter
+        'claude-haiku',        // Claude Haiku as alternative
+        'gemini-flash',        // Gemini Flash as alternative
+        'grok-fast',           // Grok Fast as alternative
+        'openrouter-haiku',
+        'openrouter-flash',
+        'openrouter-cheap',
+      ],
+
+      // === GEMINI CHAIN ===
+      // Gemini → OpenRouter flash → Claude Haiku → GPT → Grok → cheap
+      'gemini-flash': [
+        'openrouter-flash',    // Same via OpenRouter
+        'claude-haiku',        // Claude as alternative
+        'gpt-4o-mini',         // GPT as alternative
+        'grok-fast',           // Grok as alternative
+        'openrouter-gpt-nano',
+        'openrouter-haiku',
+        'openrouter-cheap',
+      ],
+
+      // === GROK CHAIN ===
+      // Grok → GPT → Claude Haiku → Gemini → OpenRouter options
+      'grok-fast': [
+        'gpt-4o-mini',         // GPT as similar-tier
+        'claude-haiku',        // Claude Haiku as alternative
+        'gemini-flash',        // Gemini as alternative
+        'openrouter-gpt-nano',
+        'openrouter-flash',
+        'openrouter-haiku',
+        'openrouter-cheap',
+      ],
+
+      // === OPENROUTER CHAINS ===
+      // Each OpenRouter model falls back to direct APIs first, then other OpenRouter models
+      'openrouter-gpt-nano': [
+        'gpt-4o-mini',         // Try direct OpenAI
+        'claude-haiku',        // Claude as alternative
+        'gemini-flash',        // Gemini as alternative
+        'grok-fast',           // Grok as alternative
+        'openrouter-flash',
+        'openrouter-haiku',
+        'openrouter-cheap',
+      ],
+      'openrouter-haiku': [
+        'claude-haiku',        // Try direct Anthropic
+        'gpt-4o-mini',         // GPT as alternative
+        'gemini-flash',        // Gemini as alternative
+        'grok-fast',           // Grok as alternative
+        'openrouter-gpt-nano',
+        'openrouter-flash',
+        'openrouter-cheap',
+      ],
+      'openrouter-flash': [
+        'gemini-flash',        // Try direct Google
+        'claude-haiku',        // Claude as alternative
+        'gpt-4o-mini',         // GPT as alternative
+        'grok-fast',           // Grok as alternative
+        'openrouter-gpt-nano',
+        'openrouter-haiku',
+        'openrouter-cheap',
+      ],
+      'openrouter-cheap': [
+        // DeepSeek/cheap fallback - try all other cheap options
+        'claude-haiku',
+        'gpt-4o-mini',
+        'gemini-flash',
+        'grok-fast',
+        'openrouter-gpt-nano',
+        'openrouter-flash',
+        'openrouter-haiku',
+      ],
     };
 
-    return fallbacks[modelId];
+    const fallbackList = fallbacks[modelId] ?? [];
+
+    // Find first available fallback that isn't already failing
+    for (const fallback of fallbackList) {
+      if (this.clients.has(fallback)) {
+        return fallback;
+      }
+    }
+
+    // Ultimate fallback: try any available client
+    for (const [clientId] of this.clients) {
+      if (clientId !== modelId) {
+        console.warn(`[ModelRouter] Using emergency fallback to ${clientId}`);
+        return clientId;
+      }
+    }
+
+    return undefined;
   }
 
   private sleep(ms: number): Promise<void> {
