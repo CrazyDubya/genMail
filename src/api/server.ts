@@ -31,6 +31,11 @@ import { runSimulation, initializeTensions } from '../simulation/tick.js';
 // APP SETUP
 // =============================================================================
 
+// Hono context variables type
+type Variables = {
+  sessionId: string;
+};
+
 interface AppContext {
   storage: Storage;
   router: ModelRouter;
@@ -60,7 +65,7 @@ interface GenerationJob {
   lastActivityAt?: Date;
 }
 
-const app = new Hono();
+const app = new Hono<{ Variables: Variables }>();
 
 // Global context
 let ctx: AppContext;
@@ -167,7 +172,7 @@ app.get('/api/mailboxes', async (c) => {
   }
 
   try {
-    const mailboxes = await ctx.storage.getSessionUniverses(sessionId);
+    const mailboxes = await ctx.storage.getSessionUniverses(sessionId as string);
 
     // Add generation job status for processing mailboxes
     const mailboxesWithStatus = mailboxes.map((mb) => {
@@ -199,12 +204,12 @@ app.post('/api/mailboxes/:id/activate', async (c) => {
 
   try {
     // Verify ownership
-    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId, universeId);
+    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId as string, universeId);
     if (!isOwned) {
       return c.json({ error: 'Mailbox not found' }, 404);
     }
 
-    await ctx.storage.setActiveUniverse(sessionId, universeId);
+    await ctx.storage.setActiveUniverse(sessionId as string, universeId);
 
     return c.json({ success: true, activeUniverseId: universeId });
   } catch (error) {
@@ -224,12 +229,12 @@ app.patch('/api/mailboxes/:id', async (c) => {
   const body = await c.req.json<{ name: string }>();
 
   try {
-    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId, universeId);
+    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId as string, universeId);
     if (!isOwned) {
       return c.json({ error: 'Mailbox not found' }, 404);
     }
 
-    await ctx.storage.renameUniverse(sessionId, universeId, body.name);
+    await ctx.storage.renameUniverse(sessionId as string, universeId, body.name);
 
     return c.json({ success: true });
   } catch (error) {
@@ -248,12 +253,12 @@ app.delete('/api/mailboxes/:id', async (c) => {
   const universeId = c.req.param('id') as UniverseId;
 
   try {
-    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId, universeId);
+    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId as string, universeId);
     if (!isOwned) {
       return c.json({ error: 'Mailbox not found' }, 404);
     }
 
-    await ctx.storage.deleteUniverseFromSession(sessionId, universeId);
+    await ctx.storage.deleteUniverseFromSession(sessionId as string, universeId);
 
     // Remove from generation jobs if present
     ctx.generationJobs.delete(universeId);
@@ -302,7 +307,7 @@ app.post('/api/universe', async (c) => {
 
     // Link universe to session with optional name
     const mailboxName = body.documents[0]?.filename?.replace(/\.[^.]+$/, '') ?? 'New Mailbox';
-    await ctx.storage.addUniverseToSession(sessionId, universeId, mailboxName);
+    await ctx.storage.addUniverseToSession(sessionId as string, universeId, mailboxName);
 
     // Start generation job
     const job: GenerationJob = {

@@ -387,7 +387,7 @@ class EmailApp extends HTMLElement {
         state.setStatus(status);
         this.pollStatus(savedId);
       }
-    } catch (e) {
+    } catch (_e) {
       localStorage.removeItem('emailverse_universe_id');
     } finally {
       state.setLoading(false);
