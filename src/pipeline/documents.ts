@@ -249,10 +249,13 @@ function mergeEntities(entities: ExtractedEntity[]): ExtractedEntity[] {
       merged.set(normalizedName, { ...entity });
 
       // Also index by aliases
-      for (const alias of entity.aliases) {
-        const normalizedAlias = alias.toLowerCase().trim();
-        if (!merged.has(normalizedAlias)) {
-          merged.set(normalizedAlias, merged.get(normalizedName)!);
+      const mergedEntity = merged.get(normalizedName);
+      if (mergedEntity) {
+        for (const alias of entity.aliases) {
+          const normalizedAlias = alias.toLowerCase().trim();
+          if (!merged.has(normalizedAlias)) {
+            merged.set(normalizedAlias, mergedEntity);
+          }
         }
       }
     }
@@ -337,10 +340,12 @@ export async function inferRelationships(
     for (let i = 0; i < presentEntities.length; i++) {
       for (let j = i + 1; j < presentEntities.length; j++) {
         const key = [presentEntities[i], presentEntities[j]].sort().join('|');
-        if (!coOccurrences.has(key)) {
-          coOccurrences.set(key, new Set());
+        let chunkSet = coOccurrences.get(key);
+        if (!chunkSet) {
+          chunkSet = new Set();
+          coOccurrences.set(key, chunkSet);
         }
-        coOccurrences.get(key)!.add(chunk.id);
+        chunkSet.add(chunk.id);
       }
     }
   }
