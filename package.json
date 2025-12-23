@@ -1,0 +1,21 @@
+{
+  "name": "emailverse",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Transform documents into explorable email universes",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @emailverse/local dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
