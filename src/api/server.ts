@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { v4 as uuid } from 'uuid';
+import pdfParse from 'pdf-parse';
 import type {
   CreateUniverseRequest,
   CreateUniverseResponse,
@@ -120,6 +121,101 @@ app.use('/api/*', async (c, next) => {
 });
 
 // JSON body parser is built into Hono
+
+// =============================================================================
+// PDF PARSING
+// =============================================================================
+
+/**
+ * Check if a string is valid base64.
+ */
+function isBase64(str: string): boolean {
+  // Base64 strings only contain these characters
+  const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+  // PDF raw content starts with %PDF, base64 of that would be JVBERi
+  return base64Regex.test(str) && (str.startsWith('JVBERi') || !str.startsWith('%PDF'));
+}
+
+/**
+ * Parse PDF content and extract text.
+ * PDFs are now sent as base64 from the client to preserve binary data integrity.
+ * Falls back to binary string decoding for backwards compatibility.
+ */
+async function parsePdfContent(content: string): Promise<string> {
+  try {
+    let buffer: Buffer;
+
+    // Check if content is base64 encoded (new approach) or raw binary string (legacy)
+    if (isBase64(content) && content.startsWith('JVBERi')) {
+      // Base64 encoded PDF - decode it
+      console.log('[PDF Parse] Decoding base64 PDF content');
+      buffer = Buffer.from(content, 'base64');
+    } else {
+      // Legacy: raw binary string (may be corrupted by UTF-8 encoding)
+      console.log('[PDF Parse] Using legacy binary string decoding');
+      buffer = Buffer.from(content, 'binary');
+    }
+
+    // Parse the PDF
+    const data = await pdfParse(buffer);
+
+    // Return extracted text
+    const text = data.text.trim();
+
+    if (!text || text.length < 50) {
+      console.warn('[PDF Parse] Extracted text is very short, PDF may be image-based or corrupted');
+    }
+
+    console.log(`[PDF Parse] Extracted ${text.length} characters from PDF`);
+    return text;
+  } catch (error) {
+    console.error('[PDF Parse] Failed to parse PDF:', error);
+    throw new Error(`Failed to parse PDF: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Check if content looks like raw PDF data (not parsed text).
+ * Handles both raw binary (%PDF-) and base64-encoded (JVBERi) PDFs.
+ */
+function isPdfBinary(content: string): boolean {
+  // Check for PDF header magic bytes (raw binary)
+  if (content.startsWith('%PDF') || content.includes('%PDF-1.')) {
+    return true;
+  }
+  // Check for base64-encoded PDF (base64 of '%PDF' is 'JVBERi')
+  if (content.startsWith('JVBERi')) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Process documents, parsing PDFs and keeping text files as-is.
+ */
+async function parseDocuments(
+  documents: Array<{ filename: string; content: string; mimeType: string }>
+): Promise<Array<{ filename: string; content: string; mimeType: string }>> {
+  return Promise.all(
+    documents.map(async (doc) => {
+      const isPdf = doc.mimeType === 'application/pdf' ||
+                    doc.filename.toLowerCase().endsWith('.pdf') ||
+                    isPdfBinary(doc.content);
+
+      if (isPdf) {
+        console.log(`[Document Processing] Parsing PDF: ${doc.filename}`);
+        const text = await parsePdfContent(doc.content);
+        return {
+          filename: doc.filename,
+          content: text,
+          mimeType: 'text/plain', // Now it's extracted text
+        };
+      }
+
+      return doc;
+    })
+  );
+}
 
 // =============================================================================
 // API ROUTES
@@ -325,8 +421,13 @@ app.post('/api/universe', async (c) => {
     };
     ctx.generationJobs.set(universeId, job);
 
-    // Run generation in background
-    generateUniverse(universeId, body.documents, config).catch((error) => {
+    // Parse PDFs and extract text before processing
+    // This is critical - raw PDF bytes contain FlateDecode streams, not actual content
+    const parsedDocuments = await parseDocuments(body.documents);
+    console.log(`[Universe ${universeId.slice(0, 8)}] Parsed ${parsedDocuments.length} document(s)`);
+
+    // Run generation in background with parsed documents
+    generateUniverse(universeId, parsedDocuments, config).catch((error) => {
       console.error('Generation failed:', error);
       job.status = 'failed';
       job.error = error.message;

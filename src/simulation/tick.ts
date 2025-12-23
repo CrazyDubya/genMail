@@ -467,8 +467,8 @@ function buildEmailPrompt(
 
   // Special handling for archetypes
   if (sender.archetype === 'newsletter_curator') {
-    const themes = world.documents.flatMap((d) => d.themes).slice(0, 3);
-    const concepts = world.documents.flatMap((d) => d.concepts ?? []).slice(0, 5);
+    const themes = world.documents.flatMap((d) => d.themes).slice(0, 4);
+    const concepts = world.documents.flatMap((d) => d.concepts ?? []).slice(0, 6);
 
     return `Write a newsletter email about this document.
 
@@ -478,15 +478,19 @@ ${documentThesis}
 KEY TOPICS:
 ${themes.map((t) => `- ${t.name}: ${t.description}`).join('\n')}
 
-KEY CONCEPTS TO DISCUSS:
-${concepts.map((c) => `- ${c.name}: ${c.definition.slice(0, 100)}...`).join('\n')}
+KEY CONCEPTS TO DISCUSS (pick 2-3 to focus on):
+${concepts.map((c) => `- ${c.name}: ${c.definition.slice(0, 200)}`).join('\n')}
+
+WHY THIS MATTERS:
+${documentSignificance.slice(0, 200)}
 
 Write an informative newsletter that:
-- Explains the main thesis in accessible terms
-- Highlights 2-3 key concepts with real substance
-- Discusses why this matters (${documentSignificance.slice(0, 100)})
+- Explains the main thesis in accessible, engaging terms
+- Dives deep into 2-3 key concepts with real technical substance
+- Connects the ideas to practical implications or applications
+- Uses varied language - avoid corporate buzzwords like "synergy", "leverage", "circle back"
 
-Keep it well-structured with sections. Length: 200-300 words.`;
+Keep it well-structured with clear sections. Length: 200-300 words.`;
   }
 
   if (sender.archetype === 'spammer') {
@@ -500,7 +504,7 @@ Subject: ${subject}
 ${contextInfo}
 
 DOCUMENT CONTEXT (what you're discussing):
-${documentThesis.slice(0, 300)}
+${documentThesis.slice(0, 500)}
 
 YOUR KNOWLEDGE (use this in the email):
 - ${senderKnowledge || 'General understanding of the topic'}
@@ -509,8 +513,13 @@ ${previousMessages.length > 0 ? `This is a reply in an ongoing thread.\n` : 'Thi
 
 Event: ${event.description}
 
-IMPORTANT: Reference SPECIFIC concepts from your knowledge. Don't be vague or generic.
-Write a natural, conversational email that demonstrates actual understanding of the subject matter.
+IMPORTANT GUIDELINES:
+1. Reference SPECIFIC concepts, methods, or findings from the document - don't be vague or generic
+2. Use VARIED vocabulary - avoid repeating the same phrases like "circle back", "align on", "nail down"
+3. Show genuine understanding - discuss implications, ask insightful questions, or share relevant perspectives
+4. Each email should have a DISTINCT focus or angle on the topic
+5. Write naturally as this specific character would - use their voice and personality
+
 Length: 75-200 words.`;
 }
 
