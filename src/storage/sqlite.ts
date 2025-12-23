@@ -106,6 +106,74 @@ export class SQLiteStorage implements Storage {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.initSchema();
+    this.runMigrations();
+  }
+
+  /**
+   * Run schema migrations for existing databases.
+   * This handles adding new columns to existing tables.
+   */
+  private runMigrations(): void {
+    // Get existing columns for documents table
+    const docColumns = this.db
+      .prepare("PRAGMA table_info(documents)")
+      .all() as Array<{ name: string }>;
+    const docColumnNames = new Set(docColumns.map(c => c.name));
+
+    // Migration: Add context column if missing
+    if (!docColumnNames.has('context')) {
+      this.db.exec('ALTER TABLE documents ADD COLUMN context TEXT');
+    }
+
+    // Migration: Add concepts column if missing
+    if (!docColumnNames.has('concepts')) {
+      this.db.exec('ALTER TABLE documents ADD COLUMN concepts TEXT');
+    }
+  }
+
+  /**
+   * Validate that the schema matches expected structure.
+   * Used for testing and debugging.
+   */
+  validateSchema(): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    // Expected documents columns
+    const expectedDocColumns = [
+      'id', 'universe_id', 'filename', 'mime_type', 'content',
+      'context', 'concepts', 'chunks', 'entities', 'themes',
+      'metadata', 'uploaded_at'
+    ];
+
+    const docColumns = this.db
+      .prepare("PRAGMA table_info(documents)")
+      .all() as Array<{ name: string }>;
+    const docColumnNames = new Set(docColumns.map(c => c.name));
+
+    for (const col of expectedDocColumns) {
+      if (!docColumnNames.has(col)) {
+        errors.push(`documents table missing column: ${col}`);
+      }
+    }
+
+    // Expected tables
+    const expectedTables = [
+      'universes', 'documents', 'characters', 'emails', 'threads',
+      'tensions', 'relationships', 'events', 'facts', 'sessions', 'user_universes'
+    ];
+
+    const tables = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+      .all() as Array<{ name: string }>;
+    const tableNames = new Set(tables.map(t => t.name));
+
+    for (const table of expectedTables) {
+      if (!tableNames.has(table)) {
+        errors.push(`missing table: ${table}`);
+      }
+    }
+
+    return { valid: errors.length === 0, errors };
   }
 
   private initSchema(): void {
