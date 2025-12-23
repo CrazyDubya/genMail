@@ -2,6 +2,11 @@
  * Document Processing Pipeline
  *
  * Handles document ingestion, chunking, and entity extraction.
+ *
+ * NEW: Uses the understanding pipeline for deep document comprehension.
+ * The key improvement is that chunks are now processed WITH document context,
+ * solving the "Attention is All You Need" problem where isolated chunk
+ * processing missed the document's core thesis.
  */
 
 import { v4 as uuid } from 'uuid';
@@ -11,8 +16,17 @@ import type {
   DocumentChunk,
   ExtractedEntity,
   Theme,
+  DocumentContext,
 } from '../types.js';
 import type { ModelRouter } from '../models/router.js';
+import {
+  analyzeDocument,
+  chunkDocumentWithContext,
+  extractConceptsFromChunks,
+  synthesizeConcepts,
+  conceptsToEntities,
+  extractThemesFromContext,
+} from './understanding.js';
 
 // =============================================================================
 // DOCUMENT CHUNKING
@@ -61,6 +75,7 @@ export function chunkDocument(
         startOffset,
         endOffset: currentOffset,
         tokenEstimate: estimateTokens(currentChunk),
+        chunkIndex: chunks.length,
       });
 
       // Start new chunk with overlap
@@ -83,6 +98,7 @@ export function chunkDocument(
       startOffset,
       endOffset: currentOffset,
       tokenEstimate: estimateTokens(currentChunk),
+      chunkIndex: chunks.length,
     });
   }
 
@@ -403,11 +419,22 @@ Respond with JSON:
 }
 
 // =============================================================================
-// FULL PROCESSING PIPELINE
+// FULL PROCESSING PIPELINE (NEW: With Document Understanding)
 // =============================================================================
 
 /**
- * Process a raw document through the full extraction pipeline.
+ * Process a raw document through the ENHANCED extraction pipeline.
+ *
+ * NEW FLOW:
+ * 1. Analyze document → get thesis, structure, core concepts
+ * 2. Chunk with context → larger chunks aware of document structure
+ * 3. Extract concepts → extract WITH document context (not isolation)
+ * 4. Synthesize → build concept hierarchy
+ * 5. Convert to legacy formats for compatibility
+ *
+ * This solves the "Attention is All You Need" problem where processing
+ * chunks in isolation missed the document's core thesis and generated
+ * 50 emails about "binary decoherence" instead of transformer architecture.
  */
 export async function processDocument(
   doc: RawDocument,
@@ -415,18 +442,89 @@ export async function processDocument(
 ): Promise<ProcessedDocument> {
   const startTime = Date.now();
 
-  // Step 1: Chunk the document
-  const chunks = chunkDocument(doc);
+  console.log(`[Document Processing] Starting enhanced pipeline for: ${doc.filename}`);
 
-  // Step 2: Extract entities and themes
-  const { entities, themes } = await extractFromChunks(chunks, router);
+  // Step 1: Deep document analysis (thesis, structure, significance)
+  console.log('[Document Processing] Step 1: Analyzing document...');
+  const context = await analyzeDocument(doc, router);
+  console.log(`[Document Processing] Document type: ${context.documentType}`);
+  console.log(`[Document Processing] Thesis: ${context.thesis.slice(0, 100)}...`);
+  console.log(`[Document Processing] Core concepts: ${context.coreConcepts.join(', ')}`);
+
+  // Step 2: Context-aware chunking (larger chunks, section-aware)
+  console.log('[Document Processing] Step 2: Chunking with context...');
+  const chunks = chunkDocumentWithContext(doc, context, {
+    maxTokens: 2500, // Larger than before (was 1000)
+    overlap: 200,
+  });
+  console.log(`[Document Processing] Created ${chunks.length} chunks`);
+
+  // Step 3: Extract concepts WITH document context
+  console.log('[Document Processing] Step 3: Extracting concepts with context...');
+  const rawConcepts = await extractConceptsFromChunks(chunks, context, router);
+  console.log(`[Document Processing] Extracted ${rawConcepts.length} raw concepts`);
+
+  // Step 4: Synthesize concepts (build hierarchy, validate)
+  console.log('[Document Processing] Step 4: Synthesizing concepts...');
+  const { concepts } = await synthesizeConcepts(rawConcepts, context, router);
+  console.log(`[Document Processing] ${concepts.length} concepts after synthesis`);
+
+  // Step 5: Convert to legacy formats for compatibility
+  const entities = conceptsToEntities(concepts);
+  const themes = extractThemesFromContext(context, concepts);
 
   const processingTimeMs = Date.now() - startTime;
+  console.log(`[Document Processing] Complete in ${processingTimeMs}ms`);
 
   return {
     id: doc.id,
     raw: doc,
+    context, // NEW: Document-level understanding
     chunks,
+    concepts, // NEW: Rich concept extraction
+    extractedEntities: entities, // Legacy compatibility
+    themes,
+    processingMetadata: {
+      chunkCount: chunks.length,
+      tokenEstimate: chunks.reduce((sum, c) => sum + c.tokenEstimate, 0),
+      processingTimeMs,
+    },
+  };
+}
+
+/**
+ * LEGACY: Process using old pipeline (for comparison/fallback).
+ */
+export async function processDocumentLegacy(
+  doc: RawDocument,
+  router: ModelRouter
+): Promise<ProcessedDocument> {
+  const startTime = Date.now();
+
+  // Old flow: chunk → extract in isolation
+  const chunks = chunkDocument(doc);
+  const { entities, themes } = await extractFromChunks(chunks, router);
+
+  const processingTimeMs = Date.now() - startTime;
+
+  // Create minimal context for compatibility
+  const fallbackContext: DocumentContext = {
+    documentType: 'unknown',
+    thesis: doc.content.slice(0, 500),
+    summary: doc.content.slice(0, 2000),
+    argumentStructure: [],
+    coreConcepts: themes.slice(0, 5).map((t) => t.name),
+    structure: [{ title: 'Document', startOffset: 0, endOffset: doc.content.length }],
+    claims: [],
+    significance: '',
+  };
+
+  return {
+    id: doc.id,
+    raw: doc,
+    context: fallbackContext,
+    chunks: chunks.map((c, i) => ({ ...c, chunkIndex: i })),
+    concepts: [], // No concepts in legacy mode
     extractedEntities: entities,
     themes,
     processingMetadata: {
