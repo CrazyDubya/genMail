@@ -131,6 +131,8 @@ export class SQLiteStorage implements Storage {
         filename TEXT NOT NULL,
         mime_type TEXT NOT NULL,
         content TEXT NOT NULL,
+        context TEXT,
+        concepts TEXT,
         chunks TEXT NOT NULL,
         entities TEXT NOT NULL,
         themes TEXT NOT NULL,
@@ -322,8 +324,8 @@ export class SQLiteStorage implements Storage {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO documents
-         (id, universe_id, filename, mime_type, content, chunks, entities, themes, metadata, uploaded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, universe_id, filename, mime_type, content, context, concepts, chunks, entities, themes, metadata, uploaded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         doc.id,
@@ -331,6 +333,8 @@ export class SQLiteStorage implements Storage {
         doc.raw.filename,
         doc.raw.mimeType,
         doc.raw.content,
+        JSON.stringify(doc.context),
+        JSON.stringify(doc.concepts),
         JSON.stringify(doc.chunks),
         JSON.stringify(doc.extractedEntities),
         JSON.stringify(doc.themes),
@@ -347,6 +351,8 @@ export class SQLiteStorage implements Storage {
       filename: string;
       mime_type: string;
       content: string;
+      context: string | null;
+      concepts: string | null;
       chunks: string;
       entities: string;
       themes: string;
@@ -363,6 +369,8 @@ export class SQLiteStorage implements Storage {
         content: row.content,
         uploadedAt: new Date(row.uploaded_at),
       },
+      context: row.context ? JSON.parse(row.context) : null,
+      concepts: row.concepts ? JSON.parse(row.concepts) : [],
       chunks: JSON.parse(row.chunks),
       extractedEntities: JSON.parse(row.entities),
       themes: JSON.parse(row.themes),
