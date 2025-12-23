@@ -876,6 +876,14 @@ async function generateUniverse(
 
     for (const [threadId, emails] of threadMap) {
       const sorted = emails.sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime());
+
+      // Determine origin type from first email
+      const firstEmail = sorted[0];
+      let originType: Thread['originType'] = 'communication';
+      if (firstEmail.type === 'spam') originType = 'spam';
+      else if (firstEmail.type === 'newsletter') originType = 'newsletter';
+      else if (firstEmail.type === 'automated') originType = 'external';
+
       const thread: Thread = {
         id: threadId as ThreadId,
         subject: sorted[0].subject,
@@ -885,6 +893,7 @@ async function generateUniverse(
         lastActivityAt: sorted[sorted.length - 1].sentAt,
         messageCount: sorted.length,
         relatedTensions: [],
+        originType,
       };
       await ctx.storage.saveThread(universeId, thread);
     }

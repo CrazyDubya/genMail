@@ -80,7 +80,7 @@ async function planTickEvents(
     }
   }
 
-  // Plan character-driven events
+  // Plan character-driven events with goal progression awareness
   const activeCharacters = characters.filter(
     (c) => c.emailBehavior.frequency === 'prolific' ||
            (c.emailBehavior.frequency === 'moderate' && Math.random() > 0.5)
@@ -91,11 +91,40 @@ async function planTickEvents(
     const urgentGoal = character.goals.find((g) => g.priority === 'immediate');
 
     if (urgentGoal) {
+      const goalStage = urgentGoal.stage ?? 'initial';
+      const emailsSent = urgentGoal.emailsSent?.length ?? 0;
+
+      // Skip if goal is advanced and character has sent many emails - they should wait for responses
+      if (goalStage === 'advanced' && emailsSent >= 4) {
+        // Maybe downgrade goal priority or skip
+        continue;
+      }
+
+      // Vary the event description based on goal stage to encourage different approaches
+      let eventDescription: string;
+      if (goalStage === 'initial' || emailsSent === 0) {
+        eventDescription = `Working on: ${urgentGoal.description}`;
+      } else if (goalStage === 'in_progress') {
+        const progressDescriptions = [
+          `Following up on: ${urgentGoal.description}`,
+          `Advancing discussion on: ${urgentGoal.description}`,
+          `Building on previous points about: ${urgentGoal.description}`,
+        ];
+        eventDescription = progressDescriptions[emailsSent % progressDescriptions.length];
+      } else {
+        const advancedDescriptions = [
+          `Wrapping up thoughts on: ${urgentGoal.description}`,
+          `Responding to feedback about: ${urgentGoal.description}`,
+          `Addressing questions about: ${urgentGoal.description}`,
+        ];
+        eventDescription = advancedDescriptions[emailsSent % advancedDescriptions.length];
+      }
+
       events.push({
         type: 'communication',
-        description: `Working on: ${urgentGoal.description}`,
+        description: eventDescription,
         participants: [character.id],
-        affectedTensions: [],
+        affectedTensions: urgentGoal.relatedTensions ?? [],
         shouldGenerateEmail: true,
       });
     }
@@ -166,8 +195,15 @@ async function generateEmailsFromEvents(
     let thread: Thread;
 
     if (!existingThread) {
-      // Create new thread
+      // Create new thread with origin type tracking
       const threadId = uuid() as ThreadId;
+
+      // Determine origin type based on sender archetype or event type
+      let originType: Thread['originType'] = 'communication';
+      if (sender.archetype === 'spammer') originType = 'spam';
+      else if (sender.archetype === 'newsletter_curator') originType = 'newsletter';
+      else if (event.type === 'external') originType = 'external';
+
       thread = {
         id: threadId,
         subject: generateSubject(event, sender, world),
@@ -177,6 +213,12 @@ async function generateEmailsFromEvents(
         lastActivityAt: currentTime,
         messageCount: 0,
         relatedTensions: event.affectedTensions,
+        originType,
+        conversationState: {
+          pendingQuestions: [],
+          pointsByParticipant: {},
+          discussedTopics: [],
+        },
       };
       threads.push(thread);
     } else {
@@ -245,6 +287,29 @@ function getEventRecipients(
     .slice(0, 3);
 }
 
+/**
+ * Get the origin type of a thread based on its first email.
+ */
+function getThreadOriginType(threadEmails: Email[], world: WorldState): Thread['originType'] {
+  if (threadEmails.length === 0) return 'communication';
+  const firstEmail = threadEmails[0];
+  const sender = world.characters.find((c) => c.id === firstEmail.from.characterId);
+  if (sender?.archetype === 'spammer') return 'spam';
+  if (sender?.archetype === 'newsletter_curator') return 'newsletter';
+  if (firstEmail.type === 'spam') return 'spam';
+  if (firstEmail.type === 'newsletter') return 'newsletter';
+  if (firstEmail.type === 'automated') return 'external';
+  return 'communication';
+}
+
+/**
+ * Check if the sender has already made too many contributions to this thread.
+ * Helps prevent one character from dominating a conversation.
+ */
+function getSenderContributionCount(threadEmails: Email[], senderId: CharacterId): number {
+  return threadEmails.filter((e) => e.from.characterId === senderId).length;
+}
+
 function findRelatedThread(
   event: PlannedEvent,
   world: WorldState,
@@ -269,6 +334,21 @@ function findRelatedThread(
     const threadEmails = world.emails.filter((e) => e.threadId === threadId);
     if (threadEmails.length === 0) continue;
 
+    // NEW: Check thread origin type - communication events should only join communication threads
+    const originType = getThreadOriginType(threadEmails, world);
+    if (originType === 'spam' || originType === 'newsletter') {
+      // Never join spam or newsletter threads with regular communication
+      continue;
+    }
+
+    // NEW: Check if sender has already contributed too much to this thread
+    const senderContributions = getSenderContributionCount(threadEmails, sender.id);
+    if (senderContributions >= 3) {
+      // This sender has sent 3+ emails to this thread - force them to wait for responses
+      // or start a new thread
+      continue;
+    }
+
     const threadParticipants = new Set(
       threadEmails.flatMap((e) => [e.from.characterId, ...e.to.map((t) => t.characterId)])
     );
@@ -285,6 +365,7 @@ function findRelatedThread(
         lastActivityAt: threadEmails[threadEmails.length - 1].sentAt,
         messageCount: threadEmails.length,
         relatedTensions: [],
+        originType,
       };
     }
   }
@@ -304,14 +385,16 @@ function generateSubject(
     return `Weekly ${topTheme} Digest #${world.tickCount + 1}`;
   }
 
-  // For spam
+  // For spam - use distinctive subjects that won't be confused with legitimate threads
   if (sender.archetype === 'spammer') {
     const spamSubjects = [
       '🚨 URGENT: You\'ve been selected!',
       'Limited Time Offer - Act Now!',
-      'Re: Your Account Status',
-      'Important Update Required',
-      'Congratulations! You Won!',
+      '💰 Congratulations! You Won!',
+      '⚡ Exclusive Deal Just For You',
+      '🔥 Don\'t Miss This Opportunity!',
+      '✨ Special Invitation Inside',
+      '🎁 Your Free Gift Awaits',
     ];
     return spamSubjects[Math.floor(Math.random() * spamSubjects.length)];
   }
@@ -336,6 +419,181 @@ function generateSubject(
   return subjects[Math.floor(Math.random() * subjects.length)];
 }
 
+/**
+ * Extract the main approach/angle from an email for goal progression tracking.
+ * Returns a short phrase describing what angle was taken.
+ * Uses bounded operations to avoid ReDoS vulnerabilities.
+ */
+function extractApproachFromEmail(body: string): string | null {
+  // Limit input length for safety
+  const safeBody = body.slice(0, 1000);
+
+  // Find the first substantive sentence
+  const sentences = safeBody.split(/[.!?]+/).filter((s) => s.trim().length > 30);
+  if (sentences.length === 0) return null;
+
+  // Clean and truncate - use bounded slice instead of unbounded regex
+  let firstSentence = sentences[0].trim().slice(0, 200);
+
+  // Remove greetings (safe bounded removal)
+  const greetings = ['hi ', 'hello ', 'hey ', 'dear '];
+  const lowerSentence = firstSentence.toLowerCase();
+  for (const greeting of greetings) {
+    if (lowerSentence.startsWith(greeting)) {
+      const commaIdx = firstSentence.indexOf(',');
+      if (commaIdx !== -1 && commaIdx < 50) {
+        firstSentence = firstSentence.slice(commaIdx + 1).trim();
+      }
+      break;
+    }
+  }
+
+  // Remove common lead-ins (safe bounded removal)
+  const leadIns = ['i think ', 'i believe ', 'we should ', 'let me ', 'i wanted to ', 'just wanted to '];
+  const lowerClean = firstSentence.toLowerCase();
+  for (const leadIn of leadIns) {
+    if (lowerClean.startsWith(leadIn)) {
+      firstSentence = firstSentence.slice(leadIn.length).trim();
+      break;
+    }
+  }
+
+  // Extract key noun phrases using indexOf (safer than unbounded regex)
+  const topicIndicators = ['about ', 'regarding ', 'on ', 'consider ', 'discuss '];
+  for (const indicator of topicIndicators) {
+    const idx = firstSentence.toLowerCase().indexOf(indicator);
+    if (idx !== -1) {
+      const start = idx + indicator.length;
+      let end = firstSentence.length;
+      // Find next comma or period
+      const nextComma = firstSentence.indexOf(',', start);
+      const nextPeriod = firstSentence.indexOf('.', start);
+      if (nextComma !== -1) end = Math.min(end, nextComma);
+      if (nextPeriod !== -1) end = Math.min(end, nextPeriod);
+      return firstSentence.slice(start, end).trim().slice(0, 60);
+    }
+  }
+
+  // Fallback to first 60 chars
+  return firstSentence.slice(0, 60);
+}
+
+/**
+ * Extract key points from an email body for anti-repetition tracking.
+ * Returns a list of main ideas/phrases from the email.
+ * Uses bounded operations to avoid ReDoS vulnerabilities.
+ */
+function extractKeyPoints(body: string): string[] {
+  const points: string[] = [];
+
+  // Limit input length for safety
+  const safeBody = body.slice(0, 2000);
+
+  // Split into sentences and extract substantive ones
+  const sentences = safeBody.split(/[.!?]+/).filter((s) => s.trim().length > 20);
+
+  for (const sentence of sentences.slice(0, 5)) {
+    // Clean up and extract the core point - use bounded string operations
+    let cleaned = sentence.trim().slice(0, 150);
+
+    // Remove greetings (safe bounded removal)
+    const greetings = ['hi ', 'hello ', 'hey ', 'dear '];
+    const lowerCleaned = cleaned.toLowerCase();
+    for (const greeting of greetings) {
+      if (lowerCleaned.startsWith(greeting)) {
+        const commaIdx = cleaned.indexOf(',');
+        if (commaIdx !== -1 && commaIdx < 50) {
+          cleaned = cleaned.slice(commaIdx + 1).trim();
+        }
+        break;
+      }
+    }
+
+    // Remove common lead-ins (safe bounded removal)
+    const leadIns = ['i think ', 'i believe ', 'we should ', 'let me ', 'i wanted to '];
+    const lowerAfter = cleaned.toLowerCase();
+    for (const leadIn of leadIns) {
+      if (lowerAfter.startsWith(leadIn)) {
+        cleaned = cleaned.slice(leadIn.length).trim();
+        break;
+      }
+    }
+
+    cleaned = cleaned.slice(0, 100);
+
+    if (cleaned.length > 15) {
+      points.push(cleaned);
+    }
+  }
+
+  return points;
+}
+
+/**
+ * Build context about what the sender has already said in this thread.
+ */
+function buildSenderHistoryContext(
+  senderId: CharacterId,
+  threadEmails: Email[]
+): { senderMessages: string[]; pointsAlreadyMade: string[] } {
+  const senderEmails = threadEmails.filter((e) => e.from.characterId === senderId);
+
+  const senderMessages = senderEmails.map((e) => e.body);
+  const pointsAlreadyMade = senderEmails.flatMap((e) => extractKeyPoints(e.body));
+
+  return { senderMessages, pointsAlreadyMade };
+}
+
+/**
+ * Identify questions or points from other participants that need addressing.
+ * Uses safe string processing to avoid ReDoS vulnerabilities.
+ */
+function findUnansweredPoints(
+  senderId: CharacterId,
+  threadEmails: Email[]
+): string[] {
+  const unanswered: string[] = [];
+
+  // Get emails from others
+  const othersEmails = threadEmails.filter((e) => e.from.characterId !== senderId);
+
+  for (const email of othersEmails.slice(-3)) {
+    // Limit body length to prevent ReDoS on very long strings
+    const body = email.body.slice(0, 2000);
+
+    // Split by sentences first, then find questions (safer than regex with unbounded repetition)
+    const sentences = body.split(/(?<=[.!?])\s+/);
+    for (const sentence of sentences) {
+      if (sentence.includes('?') && sentence.length > 10 && sentence.length < 200) {
+        unanswered.push(sentence.trim());
+        if (unanswered.length >= 4) break;
+      }
+    }
+
+    // Look for direct requests using word boundaries (safer pattern)
+    const requestPatterns = ['what do you think', 'your thoughts', 'your perspective', 'can you', 'could you'];
+    for (const pattern of requestPatterns) {
+      const idx = body.toLowerCase().indexOf(pattern);
+      if (idx !== -1) {
+        // Extract up to the next sentence boundary
+        const start = idx;
+        let end = start + 100;
+        const nextPeriod = body.indexOf('.', start);
+        const nextQuestion = body.indexOf('?', start);
+        const nextExclaim = body.indexOf('!', start);
+        const boundaries = [nextPeriod, nextQuestion, nextExclaim].filter((b) => b > start);
+        if (boundaries.length > 0) {
+          end = Math.min(...boundaries) + 1;
+        }
+        unanswered.push(body.slice(start, Math.min(end, start + 150)).trim());
+        break; // Only one request per email
+      }
+    }
+  }
+
+  return unanswered.slice(0, 4);
+}
+
 async function generateEmail(
   sender: Character,
   recipients: Character[],
@@ -349,22 +607,30 @@ async function generateEmail(
   const emailId = uuid() as EmailId;
   const eventId = uuid() as EventId;
 
-  // Get previous messages in thread for context
+  // Get ALL thread emails for comprehensive context
+  const threadEmails = world.emails
+    .filter((e) => e.threadId === thread.id)
+    .sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime());
+
+  // Get previous messages for basic context (last 3 for the prompt)
   const previousMessages = inReplyTo
-    ? world.emails
-        .filter((e) => e.threadId === thread.id)
-        .slice(-3)
-        .map((e) => `From: ${e.from.displayName}\n${e.body}`)
+    ? threadEmails.slice(-3).map((e) => `From: ${e.from.displayName}\n${e.body}`)
     : [];
 
-  // Build prompt
+  // NEW: Build enhanced context
+  const { pointsAlreadyMade } = buildSenderHistoryContext(sender.id, threadEmails);
+  const unansweredPoints = findUnansweredPoints(sender.id, threadEmails);
+
+  // Build prompt with enhanced context
   const prompt = buildEmailPrompt(
     sender,
     recipients,
     thread.subject,
     event,
     previousMessages,
-    world
+    world,
+    pointsAlreadyMade,
+    unansweredPoints
   );
 
   // Generate using character's bound model
@@ -437,16 +703,18 @@ function buildEmailPrompt(
   subject: string,
   event: PlannedEvent,
   previousMessages: string[],
-  world: WorldState
+  world: WorldState,
+  pointsAlreadyMade: string[] = [],
+  unansweredPoints: string[] = []
 ): string {
   const recipientNames = recipients.map((r) => r.name).join(', ');
 
-  // NEW: Get document context if available
+  // Get document context if available
   const docContext = world.documents[0]?.context;
   const documentThesis = docContext?.thesis ?? '';
   const documentSignificance = docContext?.significance ?? '';
 
-  // NEW: Include sender's actual knowledge
+  // Include sender's actual knowledge
   const senderKnowledge = sender.knows.slice(0, 5).join('\n- ');
 
   let contextInfo = '';
@@ -459,10 +727,19 @@ function buildEmailPrompt(
     }
   }
 
-  // Add goal context
+  // Add goal context with progression tracking
   const relevantGoal = sender.goals.find((g) => g.priority === 'immediate');
   if (relevantGoal) {
-    contextInfo += `\nYou're working on: ${relevantGoal.description}`;
+    const goalStage = relevantGoal.stage ?? 'initial';
+    const approachesTaken = relevantGoal.approachesTaken ?? [];
+
+    if (goalStage === 'initial') {
+      contextInfo += `\nYou're introducing: ${relevantGoal.description}`;
+    } else if (approachesTaken.length > 0) {
+      contextInfo += `\nYou're advancing: ${relevantGoal.description}`;
+      contextInfo += `\nYou've already discussed: ${approachesTaken.slice(-2).join(', ')}`;
+      contextInfo += `\nNow take a NEW angle or build on the conversation.`;
+    }
   }
 
   // Special handling for archetypes
@@ -498,29 +775,70 @@ Keep it well-structured with clear sections. Length: 200-300 words.`;
 Include vague urgency and a call to action. Length: 50-100 words.`;
   }
 
-  // NEW: Enhanced prompt with document context and character knowledge
+  // Build anti-repetition section
+  let antiRepetitionSection = '';
+  if (pointsAlreadyMade.length > 0) {
+    antiRepetitionSection = `
+⚠️ CRITICAL - DO NOT REPEAT THESE POINTS (you've already made them in this thread):
+${pointsAlreadyMade.slice(0, 5).map((p) => `- "${p.slice(0, 80)}..."`).join('\n')}
+
+You MUST take a DIFFERENT angle. Options:
+- Respond to what others have said
+- Ask a new question
+- Bring up a different aspect of the document
+- Share a concrete example or implication
+- Acknowledge a counterpoint and address it
+`;
+  }
+
+  // Build response requirements section
+  let responseSection = '';
+  if (unansweredPoints.length > 0) {
+    responseSection = `
+📝 RESPOND TO THESE (from other participants):
+${unansweredPoints.map((p) => `- ${p.slice(0, 100)}`).join('\n')}
+
+Address at least one of these points before making new arguments.
+`;
+  }
+
+  // Build thread context
+  let threadContext = '';
+  if (previousMessages.length > 0) {
+    threadContext = `
+RECENT THREAD MESSAGES:
+${previousMessages.join('\n---\n')}
+
+This is a REPLY. You must:
+1. Acknowledge or respond to something specific from the last message
+2. Advance the conversation (don't just restate)
+3. Either answer a question, ask a new one, or provide new information
+`;
+  } else {
+    threadContext = '\nThis is a NEW email starting a conversation.\n';
+  }
+
+  // Enhanced prompt with all context
   return `Write an email to ${recipientNames}.
 Subject: ${subject}
 ${contextInfo}
 
 DOCUMENT CONTEXT (what you're discussing):
-${documentThesis.slice(0, 500)}
+${documentThesis.slice(0, 400)}
 
-YOUR KNOWLEDGE (use this in the email):
+YOUR KNOWLEDGE (draw from this):
 - ${senderKnowledge || 'General understanding of the topic'}
+${threadContext}${antiRepetitionSection}${responseSection}
+Event triggering this email: ${event.description}
 
-${previousMessages.length > 0 ? `This is a reply in an ongoing thread.\n` : 'This is a new email.\n'}
+WRITING GUIDELINES:
+1. Reference SPECIFIC concepts from the document - be concrete, not vague
+2. If replying, directly engage with what others said (agree, disagree, build on, question)
+3. Each email must have a DISTINCT purpose - don't just restate previous points
+4. Write naturally as ${sender.name} - match their voice and perspective
+5. Keep it focused - one main point or question, well-developed
 
-Event: ${event.description}
-
-IMPORTANT GUIDELINES:
-1. Reference SPECIFIC concepts, methods, or findings from the document - don't be vague or generic
-2. Use VARIED vocabulary - avoid repeating the same phrases like "circle back", "align on", "nail down"
-3. Show genuine understanding - discuss implications, ask insightful questions, or share relevant perspectives
-4. Each email should have a DISTINCT focus or angle on the topic
-5. Write naturally as this specific character would - use their voice and personality
-
-Length: 75-200 words.`;
+Length: 75-150 words.`;
 }
 
 function getEmailType(sender: Character, event: PlannedEvent): Email['type'] {
@@ -731,6 +1049,47 @@ function updateWorldState(
           char.knows.push(knowledge);
         }
       }
+    }
+  }
+
+  // NEW: Update goal progression for senders
+  for (const email of emails) {
+    const sender = world.characters.find((c) => c.id === email.from.characterId);
+    if (!sender) continue;
+
+    // Find the event that generated this email
+    const eventIdx = emails.indexOf(email);
+    const event = events[eventIdx];
+    if (!event || !event.description.startsWith('Working on:')) continue;
+
+    // Find the matching goal
+    const goalDescription = event.description.replace('Working on: ', '');
+    const goal = sender.goals.find((g) => g.description === goalDescription);
+
+    if (goal) {
+      // Track this email against the goal
+      goal.emailsSent = goal.emailsSent ?? [];
+      goal.emailsSent.push(email.id);
+
+      // Update goal stage based on emails sent
+      if (goal.emailsSent.length === 1) {
+        goal.stage = 'in_progress';
+      } else if (goal.emailsSent.length >= 3) {
+        goal.stage = 'advanced';
+      }
+
+      // Track the approach taken (extract key phrase from email)
+      goal.approachesTaken = goal.approachesTaken ?? [];
+      const approach = extractApproachFromEmail(email.body);
+      if (approach && !goal.approachesTaken.includes(approach)) {
+        goal.approachesTaken.push(approach);
+      }
+
+      changes.push({
+        type: 'character_update',
+        entityId: sender.id,
+        description: `Goal progressed: ${goal.description} (stage: ${goal.stage})`,
+      });
     }
   }
 
