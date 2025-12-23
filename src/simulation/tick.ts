@@ -422,22 +422,56 @@ function generateSubject(
 /**
  * Extract the main approach/angle from an email for goal progression tracking.
  * Returns a short phrase describing what angle was taken.
+ * Uses bounded operations to avoid ReDoS vulnerabilities.
  */
 function extractApproachFromEmail(body: string): string | null {
+  // Limit input length for safety
+  const safeBody = body.slice(0, 1000);
+
   // Find the first substantive sentence
-  const sentences = body.split(/[.!?]+/).filter((s) => s.trim().length > 30);
+  const sentences = safeBody.split(/[.!?]+/).filter((s) => s.trim().length > 30);
   if (sentences.length === 0) return null;
 
-  // Clean and truncate
-  const firstSentence = sentences[0]
-    .trim()
-    .replace(/^(Hi|Hello|Hey|Dear)[^,]*,?\s*/i, '')
-    .replace(/^(I think|I believe|We should|Let me|I wanted to|Just wanted to)\s*/i, '');
+  // Clean and truncate - use bounded slice instead of unbounded regex
+  let firstSentence = sentences[0].trim().slice(0, 200);
 
-  // Extract key noun phrases or topics
-  const topicMatch = firstSentence.match(/(?:about|regarding|on|consider|discuss)\s+([^,.]+)/i);
-  if (topicMatch) {
-    return topicMatch[1].trim().slice(0, 60);
+  // Remove greetings (safe bounded removal)
+  const greetings = ['hi ', 'hello ', 'hey ', 'dear '];
+  const lowerSentence = firstSentence.toLowerCase();
+  for (const greeting of greetings) {
+    if (lowerSentence.startsWith(greeting)) {
+      const commaIdx = firstSentence.indexOf(',');
+      if (commaIdx !== -1 && commaIdx < 50) {
+        firstSentence = firstSentence.slice(commaIdx + 1).trim();
+      }
+      break;
+    }
+  }
+
+  // Remove common lead-ins (safe bounded removal)
+  const leadIns = ['i think ', 'i believe ', 'we should ', 'let me ', 'i wanted to ', 'just wanted to '];
+  const lowerClean = firstSentence.toLowerCase();
+  for (const leadIn of leadIns) {
+    if (lowerClean.startsWith(leadIn)) {
+      firstSentence = firstSentence.slice(leadIn.length).trim();
+      break;
+    }
+  }
+
+  // Extract key noun phrases using indexOf (safer than unbounded regex)
+  const topicIndicators = ['about ', 'regarding ', 'on ', 'consider ', 'discuss '];
+  for (const indicator of topicIndicators) {
+    const idx = firstSentence.toLowerCase().indexOf(indicator);
+    if (idx !== -1) {
+      const start = idx + indicator.length;
+      let end = firstSentence.length;
+      // Find next comma or period
+      const nextComma = firstSentence.indexOf(',', start);
+      const nextPeriod = firstSentence.indexOf('.', start);
+      if (nextComma !== -1) end = Math.min(end, nextComma);
+      if (nextPeriod !== -1) end = Math.min(end, nextPeriod);
+      return firstSentence.slice(start, end).trim().slice(0, 60);
+    }
   }
 
   // Fallback to first 60 chars
@@ -447,20 +481,45 @@ function extractApproachFromEmail(body: string): string | null {
 /**
  * Extract key points from an email body for anti-repetition tracking.
  * Returns a list of main ideas/phrases from the email.
+ * Uses bounded operations to avoid ReDoS vulnerabilities.
  */
 function extractKeyPoints(body: string): string[] {
   const points: string[] = [];
 
+  // Limit input length for safety
+  const safeBody = body.slice(0, 2000);
+
   // Split into sentences and extract substantive ones
-  const sentences = body.split(/[.!?]+/).filter((s) => s.trim().length > 20);
+  const sentences = safeBody.split(/[.!?]+/).filter((s) => s.trim().length > 20);
 
   for (const sentence of sentences.slice(0, 5)) {
-    // Clean up and extract the core point
-    const cleaned = sentence
-      .trim()
-      .replace(/^(Hi|Hello|Hey|Dear)[^,]*,?\s*/i, '')
-      .replace(/^(I think|I believe|We should|Let me|I wanted to)\s*/i, '')
-      .slice(0, 100);
+    // Clean up and extract the core point - use bounded string operations
+    let cleaned = sentence.trim().slice(0, 150);
+
+    // Remove greetings (safe bounded removal)
+    const greetings = ['hi ', 'hello ', 'hey ', 'dear '];
+    const lowerCleaned = cleaned.toLowerCase();
+    for (const greeting of greetings) {
+      if (lowerCleaned.startsWith(greeting)) {
+        const commaIdx = cleaned.indexOf(',');
+        if (commaIdx !== -1 && commaIdx < 50) {
+          cleaned = cleaned.slice(commaIdx + 1).trim();
+        }
+        break;
+      }
+    }
+
+    // Remove common lead-ins (safe bounded removal)
+    const leadIns = ['i think ', 'i believe ', 'we should ', 'let me ', 'i wanted to '];
+    const lowerAfter = cleaned.toLowerCase();
+    for (const leadIn of leadIns) {
+      if (lowerAfter.startsWith(leadIn)) {
+        cleaned = cleaned.slice(leadIn.length).trim();
+        break;
+      }
+    }
+
+    cleaned = cleaned.slice(0, 100);
 
     if (cleaned.length > 15) {
       points.push(cleaned);
@@ -487,6 +546,7 @@ function buildSenderHistoryContext(
 
 /**
  * Identify questions or points from other participants that need addressing.
+ * Uses safe string processing to avoid ReDoS vulnerabilities.
  */
 function findUnansweredPoints(
   senderId: CharacterId,
@@ -498,16 +558,36 @@ function findUnansweredPoints(
   const othersEmails = threadEmails.filter((e) => e.from.characterId !== senderId);
 
   for (const email of othersEmails.slice(-3)) {
-    // Look for questions
-    const questions = email.body.match(/[^.!?]*\?/g);
-    if (questions) {
-      unanswered.push(...questions.map((q) => q.trim()).slice(0, 2));
+    // Limit body length to prevent ReDoS on very long strings
+    const body = email.body.slice(0, 2000);
+
+    // Split by sentences first, then find questions (safer than regex with unbounded repetition)
+    const sentences = body.split(/(?<=[.!?])\s+/);
+    for (const sentence of sentences) {
+      if (sentence.includes('?') && sentence.length > 10 && sentence.length < 200) {
+        unanswered.push(sentence.trim());
+        if (unanswered.length >= 4) break;
+      }
     }
 
-    // Look for direct requests or points
-    const requests = email.body.match(/(?:what do you think|your thoughts|your perspective|can you|could you)[^.?!]*/gi);
-    if (requests) {
-      unanswered.push(...requests.map((r) => r.trim()).slice(0, 1));
+    // Look for direct requests using word boundaries (safer pattern)
+    const requestPatterns = ['what do you think', 'your thoughts', 'your perspective', 'can you', 'could you'];
+    for (const pattern of requestPatterns) {
+      const idx = body.toLowerCase().indexOf(pattern);
+      if (idx !== -1) {
+        // Extract up to the next sentence boundary
+        const start = idx;
+        let end = start + 100;
+        const nextPeriod = body.indexOf('.', start);
+        const nextQuestion = body.indexOf('?', start);
+        const nextExclaim = body.indexOf('!', start);
+        const boundaries = [nextPeriod, nextQuestion, nextExclaim].filter((b) => b > start);
+        if (boundaries.length > 0) {
+          end = Math.min(...boundaries) + 1;
+        }
+        unanswered.push(body.slice(start, Math.min(end, start + 150)).trim());
+        break; // Only one request per email
+      }
     }
   }
 
