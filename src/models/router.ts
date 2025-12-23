@@ -2,6 +2,7 @@
  * ModelRouter - Central hub for all LLM interactions
  *
  * All model calls go through here. Character voice binding is enforced here.
+ * Includes cost tracking and detailed logging for transparency.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -33,8 +34,89 @@ export interface GenerationContext {
   characterKnowledge?: string[];
 }
 
+// =============================================================================
+// COST TRACKING - Pricing per million tokens (December 2025)
+// =============================================================================
+
+export interface ModelPricing {
+  inputPerMillion: number;
+  outputPerMillion: number;
+  modelName: string;
+  provider: string;
+}
+
+// Latest model pricing as of December 2025
+export const MODEL_PRICING: Record<ModelIdentifier, ModelPricing> = {
+  'claude-opus': {
+    inputPerMillion: 15.0,
+    outputPerMillion: 75.0,
+    modelName: 'claude-opus-4-5-20251101',
+    provider: 'Anthropic',
+  },
+  'claude-sonnet': {
+    inputPerMillion: 3.0,
+    outputPerMillion: 15.0,
+    modelName: 'claude-sonnet-4-5-20250929',
+    provider: 'Anthropic',
+  },
+  'claude-haiku': {
+    inputPerMillion: 0.8,
+    outputPerMillion: 4.0,
+    modelName: 'claude-haiku-4-5-20251001',
+    provider: 'Anthropic',
+  },
+  'gpt-4o-mini': {
+    inputPerMillion: 0.15,
+    outputPerMillion: 0.60,
+    modelName: 'gpt-4o-mini',
+    provider: 'OpenAI',
+  },
+  'gemini-flash': {
+    inputPerMillion: 0.10,
+    outputPerMillion: 0.40,
+    modelName: 'gemini-2.0-flash',
+    provider: 'Google',
+  },
+  'grok-fast': {
+    inputPerMillion: 0.20,
+    outputPerMillion: 0.50,
+    modelName: 'grok-3-fast',
+    provider: 'xAI',
+  },
+  'openrouter-cheap': {
+    inputPerMillion: 0.05,
+    outputPerMillion: 0.10,
+    modelName: 'deepseek/deepseek-chat',
+    provider: 'OpenRouter',
+  },
+};
+
+export interface UsageStats {
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCost: number;
+}
+
+export interface ModelCallLog {
+  timestamp: Date;
+  modelId: ModelIdentifier;
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCost: number;
+  durationMs: number;
+  success: boolean;
+  error?: string;
+  purpose?: string;
+}
+
+export interface GenerationResult {
+  text: string;
+  usage: UsageStats;
+  durationMs: number;
+}
+
 interface ModelClient {
-  generate(prompt: string, options: GenerationOptions): Promise<string>;
+  generate(prompt: string, options: GenerationOptions): Promise<GenerationResult>;
 }
 
 // =============================================================================
@@ -44,6 +126,7 @@ interface ModelClient {
 class ClaudeClient implements ModelClient {
   private client: Anthropic;
   private model: string;
+  private modelId: ModelIdentifier;
 
   constructor(apiKey: string, model: 'opus' | 'sonnet' | 'haiku') {
     this.client = new Anthropic({ apiKey });
@@ -52,10 +135,17 @@ class ClaudeClient implements ModelClient {
       sonnet: 'claude-sonnet-4-5-20250929',
       haiku: 'claude-haiku-4-5-20251001',
     };
+    const idMap: Record<string, ModelIdentifier> = {
+      opus: 'claude-opus',
+      sonnet: 'claude-sonnet',
+      haiku: 'claude-haiku',
+    };
     this.model = modelMap[model];
+    this.modelId = idMap[model];
   }
 
-  async generate(prompt: string, options: GenerationOptions): Promise<string> {
+  async generate(prompt: string, options: GenerationOptions): Promise<GenerationResult> {
+    const startTime = Date.now();
     const response = await this.client.messages.create({
       model: this.model,
       max_tokens: options.maxTokens ?? 2048,
@@ -69,20 +159,33 @@ class ClaudeClient implements ModelClient {
     if (!textBlock || textBlock.type !== 'text') {
       throw new Error('No text response from Claude');
     }
-    return textBlock.text;
+
+    const inputTokens = response.usage.input_tokens;
+    const outputTokens = response.usage.output_tokens;
+    const pricing = MODEL_PRICING[this.modelId];
+    const estimatedCost = (inputTokens * pricing.inputPerMillion + outputTokens * pricing.outputPerMillion) / 1_000_000;
+
+    return {
+      text: textBlock.text,
+      usage: { inputTokens, outputTokens, estimatedCost },
+      durationMs: Date.now() - startTime,
+    };
   }
 }
 
 class OpenAIClient implements ModelClient {
   private apiKey: string;
   private model: string;
+  private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'gpt-4o-mini') {
+  constructor(apiKey: string, model: string = 'gpt-4o-mini', modelId: ModelIdentifier = 'gpt-4o-mini') {
     this.apiKey = apiKey;
     this.model = model;
+    this.modelId = modelId;
   }
 
-  async generate(prompt: string, options: GenerationOptions): Promise<string> {
+  async generate(prompt: string, options: GenerationOptions): Promise<GenerationResult> {
+    const startTime = Date.now();
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -110,21 +213,40 @@ class OpenAIClient implements ModelClient {
 
     const data = (await response.json()) as {
       choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens: number; completion_tokens: number };
     };
-    return data.choices[0].message.content;
+
+    const inputTokens = data.usage?.prompt_tokens ?? this.estimateTokens(prompt);
+    const outputTokens = data.usage?.completion_tokens ?? this.estimateTokens(data.choices[0].message.content);
+    const pricing = MODEL_PRICING[this.modelId];
+    const estimatedCost = (inputTokens * pricing.inputPerMillion + outputTokens * pricing.outputPerMillion) / 1_000_000;
+
+    return {
+      text: data.choices[0].message.content,
+      usage: { inputTokens, outputTokens, estimatedCost },
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private estimateTokens(text: string): number {
+    // Rough estimate: ~4 characters per token
+    return Math.ceil(text.length / 4);
   }
 }
 
 class GeminiClient implements ModelClient {
   private apiKey: string;
   private model: string;
+  private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'gemini-1.5-flash') {
+  constructor(apiKey: string, model: string = 'gemini-2.0-flash', modelId: ModelIdentifier = 'gemini-flash') {
     this.apiKey = apiKey;
     this.model = model;
+    this.modelId = modelId;
   }
 
-  async generate(prompt: string, options: GenerationOptions): Promise<string> {
+  async generate(prompt: string, options: GenerationOptions): Promise<GenerationResult> {
+    const startTime = Date.now();
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
 
     const response = await fetch(url, {
@@ -150,21 +272,40 @@ class GeminiClient implements ModelClient {
 
     const data = (await response.json()) as {
       candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
+      usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number };
     };
-    return data.candidates[0].content.parts[0].text;
+
+    const outputText = data.candidates[0].content.parts[0].text;
+    const inputTokens = data.usageMetadata?.promptTokenCount ?? this.estimateTokens(prompt);
+    const outputTokens = data.usageMetadata?.candidatesTokenCount ?? this.estimateTokens(outputText);
+    const pricing = MODEL_PRICING[this.modelId];
+    const estimatedCost = (inputTokens * pricing.inputPerMillion + outputTokens * pricing.outputPerMillion) / 1_000_000;
+
+    return {
+      text: outputText,
+      usage: { inputTokens, outputTokens, estimatedCost },
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
   }
 }
 
 class GrokClient implements ModelClient {
   private apiKey: string;
   private model: string;
+  private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'grok-beta') {
+  constructor(apiKey: string, model: string = 'grok-3-fast', modelId: ModelIdentifier = 'grok-fast') {
     this.apiKey = apiKey;
     this.model = model;
+    this.modelId = modelId;
   }
 
-  async generate(prompt: string, options: GenerationOptions): Promise<string> {
+  async generate(prompt: string, options: GenerationOptions): Promise<GenerationResult> {
+    const startTime = Date.now();
     const response = await fetch('https://api.x.ai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -192,21 +333,40 @@ class GrokClient implements ModelClient {
 
     const data = (await response.json()) as {
       choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens: number; completion_tokens: number };
     };
-    return data.choices[0].message.content;
+
+    const outputText = data.choices[0].message.content;
+    const inputTokens = data.usage?.prompt_tokens ?? this.estimateTokens(prompt);
+    const outputTokens = data.usage?.completion_tokens ?? this.estimateTokens(outputText);
+    const pricing = MODEL_PRICING[this.modelId];
+    const estimatedCost = (inputTokens * pricing.inputPerMillion + outputTokens * pricing.outputPerMillion) / 1_000_000;
+
+    return {
+      text: outputText,
+      usage: { inputTokens, outputTokens, estimatedCost },
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
   }
 }
 
 class OpenRouterClient implements ModelClient {
   private apiKey: string;
   private model: string;
+  private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'mistralai/mistral-7b-instruct') {
+  constructor(apiKey: string, model: string = 'deepseek/deepseek-chat', modelId: ModelIdentifier = 'openrouter-cheap') {
     this.apiKey = apiKey;
     this.model = model;
+    this.modelId = modelId;
   }
 
-  async generate(prompt: string, options: GenerationOptions): Promise<string> {
+  async generate(prompt: string, options: GenerationOptions): Promise<GenerationResult> {
+    const startTime = Date.now();
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -236,8 +396,24 @@ class OpenRouterClient implements ModelClient {
 
     const data = (await response.json()) as {
       choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens: number; completion_tokens: number };
     };
-    return data.choices[0].message.content;
+
+    const outputText = data.choices[0].message.content;
+    const inputTokens = data.usage?.prompt_tokens ?? this.estimateTokens(prompt);
+    const outputTokens = data.usage?.completion_tokens ?? this.estimateTokens(outputText);
+    const pricing = MODEL_PRICING[this.modelId];
+    const estimatedCost = (inputTokens * pricing.inputPerMillion + outputTokens * pricing.outputPerMillion) / 1_000_000;
+
+    return {
+      text: outputText,
+      usage: { inputTokens, outputTokens, estimatedCost },
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
   }
 }
 
@@ -245,10 +421,26 @@ class OpenRouterClient implements ModelClient {
 // MODEL ROUTER
 // =============================================================================
 
+export interface CumulativeUsage {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCost: number;
+  callCount: number;
+  byModel: Record<ModelIdentifier, UsageStats & { callCount: number }>;
+}
+
 export class ModelRouter {
   private clients: Map<ModelIdentifier, ModelClient> = new Map();
   private characterBindings: Map<string, CharacterVoiceBinding> = new Map();
   private callCounts: Map<ModelIdentifier, number> = new Map();
+  private callLog: ModelCallLog[] = [];
+  private cumulativeUsage: CumulativeUsage = {
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCost: 0,
+    callCount: 0,
+    byModel: {} as Record<ModelIdentifier, UsageStats & { callCount: number }>,
+  };
 
   constructor(config: ModelConfig) {
     // Initialize all clients
@@ -276,10 +468,18 @@ export class ModelRouter {
       );
     }
 
-    // Initialize call counts
+    // Initialize call counts and usage tracking
     for (const modelId of this.clients.keys()) {
       this.callCounts.set(modelId, 0);
+      this.cumulativeUsage.byModel[modelId] = {
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCost: 0,
+        callCount: 0,
+      };
     }
+
+    console.log(`[ModelRouter] Initialized with models: ${this.getAvailableModels().join(', ')}`);
   }
 
   /**
@@ -306,35 +506,115 @@ export class ModelRouter {
 
   /**
    * Generate content directly using a specific model.
+   * Returns just the text for backward compatibility.
    */
   async generate(
     modelId: ModelIdentifier,
     prompt: string,
-    options: GenerationOptions = {}
+    options: GenerationOptions = {},
+    purpose?: string
   ): Promise<string> {
+    const result = await this.generateWithUsage(modelId, prompt, options, purpose);
+    return result.text;
+  }
+
+  /**
+   * Generate content with full usage statistics.
+   */
+  async generateWithUsage(
+    modelId: ModelIdentifier,
+    prompt: string,
+    options: GenerationOptions = {},
+    purpose?: string
+  ): Promise<GenerationResult> {
     const client = this.clients.get(modelId);
     if (!client) {
       // Try fallback
       const fallback = this.getFallback(modelId);
       if (fallback) {
-        console.warn(`Model ${modelId} not available, falling back to ${fallback}`);
-        return this.generate(fallback, prompt, options);
+        console.warn(`[ModelRouter] Model ${modelId} not available, falling back to ${fallback}`);
+        return this.generateWithUsage(fallback, prompt, options, purpose);
       }
       throw new Error(`Unknown model: ${modelId}`);
     }
 
     this.incrementCallCount(modelId);
 
+    const startTime = Date.now();
     try {
-      return await this.withRetry(() => client.generate(prompt, options), modelId);
+      const result = await this.withRetry(() => client.generate(prompt, options), modelId);
+
+      // Log the call
+      this.logCall({
+        timestamp: new Date(),
+        modelId,
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        estimatedCost: result.usage.estimatedCost,
+        durationMs: result.durationMs,
+        success: true,
+        purpose,
+      });
+
+      // Update cumulative usage
+      this.updateCumulativeUsage(modelId, result.usage);
+
+      console.log(
+        `[ModelRouter] ${modelId}: ${result.usage.inputTokens}in/${result.usage.outputTokens}out tokens, ` +
+        `$${result.usage.estimatedCost.toFixed(6)}, ${result.durationMs}ms` +
+        (purpose ? ` (${purpose})` : '')
+      );
+
+      return result;
     } catch (error) {
+      // Log failed call
+      this.logCall({
+        timestamp: new Date(),
+        modelId,
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCost: 0,
+        durationMs: Date.now() - startTime,
+        success: false,
+        error: (error as Error).message,
+        purpose,
+      });
+
       const fallback = this.getFallback(modelId);
       if (fallback) {
-        console.warn(`Falling back from ${modelId} to ${fallback}`);
-        return this.generate(fallback, prompt, options);
+        console.warn(`[ModelRouter] Falling back from ${modelId} to ${fallback}: ${(error as Error).message}`);
+        return this.generateWithUsage(fallback, prompt, options, purpose);
       }
       throw error;
     }
+  }
+
+  private logCall(log: ModelCallLog): void {
+    this.callLog.push(log);
+    // Keep only last 1000 calls in memory
+    if (this.callLog.length > 1000) {
+      this.callLog.shift();
+    }
+  }
+
+  private updateCumulativeUsage(modelId: ModelIdentifier, usage: UsageStats): void {
+    this.cumulativeUsage.totalInputTokens += usage.inputTokens;
+    this.cumulativeUsage.totalOutputTokens += usage.outputTokens;
+    this.cumulativeUsage.totalCost += usage.estimatedCost;
+    this.cumulativeUsage.callCount += 1;
+
+    if (!this.cumulativeUsage.byModel[modelId]) {
+      this.cumulativeUsage.byModel[modelId] = {
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCost: 0,
+        callCount: 0,
+      };
+    }
+    this.cumulativeUsage.byModel[modelId].inputTokens += usage.inputTokens;
+    this.cumulativeUsage.byModel[modelId].outputTokens += usage.outputTokens;
+    this.cumulativeUsage.byModel[modelId].estimatedCost += usage.estimatedCost;
+    this.cumulativeUsage.byModel[modelId].callCount += 1;
   }
 
   /**
@@ -393,11 +673,66 @@ IMPORTANT: Respond with valid JSON only. No markdown, no explanation, just the J
   }
 
   /**
-   * Reset call counts.
+   * Get cumulative usage statistics.
    */
-  resetCallCounts(): void {
+  getCumulativeUsage(): CumulativeUsage {
+    return { ...this.cumulativeUsage };
+  }
+
+  /**
+   * Get the call log for debugging/monitoring.
+   */
+  getCallLog(): ModelCallLog[] {
+    return [...this.callLog];
+  }
+
+  /**
+   * Get a formatted cost summary.
+   */
+  getCostSummary(): string {
+    const usage = this.cumulativeUsage;
+    const lines = [
+      `=== Cost Summary ===`,
+      `Total Calls: ${usage.callCount}`,
+      `Total Tokens: ${usage.totalInputTokens.toLocaleString()} in / ${usage.totalOutputTokens.toLocaleString()} out`,
+      `Total Cost: $${usage.totalCost.toFixed(4)}`,
+      ``,
+      `By Model:`,
+    ];
+
+    for (const [modelId, stats] of Object.entries(usage.byModel)) {
+      if (stats.callCount > 0) {
+        lines.push(
+          `  ${modelId}: ${stats.callCount} calls, ` +
+          `${stats.inputTokens.toLocaleString()}/${stats.outputTokens.toLocaleString()} tokens, ` +
+          `$${stats.estimatedCost.toFixed(4)}`
+        );
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Reset all usage statistics.
+   */
+  resetUsageStats(): void {
+    this.callLog = [];
+    this.cumulativeUsage = {
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCost: 0,
+      callCount: 0,
+      byModel: {} as Record<ModelIdentifier, UsageStats & { callCount: number }>,
+    };
     for (const modelId of this.clients.keys()) {
       this.callCounts.set(modelId, 0);
+      this.cumulativeUsage.byModel[modelId] = {
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCost: 0,
+        callCount: 0,
+      };
     }
   }
 
@@ -447,11 +782,11 @@ Write ONLY the email content. Match the voice profile exactly. Do not include he
     this.callCounts.set(modelId, current + 1);
   }
 
-  private async withRetry<T>(
-    fn: () => Promise<T>,
+  private async withRetry(
+    fn: () => Promise<GenerationResult>,
     modelId: ModelIdentifier,
     maxRetries: number = 3
-  ): Promise<T> {
+  ): Promise<GenerationResult> {
     let lastError: Error | undefined;
 
     for (let i = 0; i < maxRetries; i++) {
@@ -462,11 +797,13 @@ Write ONLY the email content. Match the voice profile exactly. Do not include he
 
         if (this.isRateLimitError(error)) {
           const backoff = this.getBackoffMs(modelId, i);
-          console.warn(`Rate limited on ${modelId}, waiting ${backoff}ms`);
+          console.warn(`[ModelRouter] Rate limited on ${modelId}, waiting ${backoff}ms (attempt ${i + 1}/${maxRetries})`);
           await this.sleep(backoff);
           continue;
         }
 
+        // Log non-rate-limit errors
+        console.error(`[ModelRouter] Error on ${modelId}: ${lastError.message}`);
         throw error;
       }
     }
@@ -530,7 +867,7 @@ export function createModelRouter(config?: Partial<ModelConfig>): ModelRouter {
     openrouter: {
       apiKey: config?.openrouter?.apiKey ?? process.env.OPENROUTER_API_KEY ?? '',
       defaultModel:
-        config?.openrouter?.defaultModel ?? 'mistralai/mistral-7b-instruct',
+        config?.openrouter?.defaultModel ?? 'deepseek/deepseek-chat', // Updated to DeepSeek for better cost efficiency
     },
   };
 

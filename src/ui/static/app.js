@@ -188,19 +188,38 @@ class EmailApp extends HTMLElement {
   }
 
   async pollStatus(universeId) {
+    let consecutiveErrors = 0;
+    const maxErrors = 5;
+
     const poll = async () => {
       try {
         const status = await api.getStatus(universeId);
         state.setStatus(status);
+        consecutiveErrors = 0; // Reset on success
 
         if (status.status === 'complete') {
           const data = await api.getEmails(universeId);
           state.setUniverse(universeId, data);
+        } else if (status.status === 'failed') {
+          // Stop polling on failure - the UI will show the error
+          console.error('Generation failed:', status.error);
         } else if (status.status === 'processing') {
-          setTimeout(poll, 2000);
+          setTimeout(poll, 1500); // Poll slightly faster for better feedback
         }
       } catch (e) {
         console.error('Poll failed:', e);
+        consecutiveErrors++;
+        if (consecutiveErrors < maxErrors) {
+          // Retry with backoff
+          setTimeout(poll, 2000 * consecutiveErrors);
+        } else {
+          // Show network error after too many failures
+          state.setStatus({
+            status: 'failed',
+            error: 'Lost connection to server. Please refresh the page.',
+            progress: { phase: 'documents', percentComplete: 0 },
+          });
+        }
       }
     };
     poll();
@@ -218,14 +237,50 @@ class EmailApp extends HTMLElement {
     }
 
     if (state.status && state.status.status === 'processing') {
+      const progress = state.status.progress;
+      const cost = state.status.cost;
+      const elapsed = progress.elapsedSeconds || 0;
+      const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`;
+
       this.innerHTML = `
         <div class="loading">
           <div class="loading-spinner"></div>
-          <div class="loading-text">${state.status.progress.currentTask || 'Processing...'}</div>
+          <div class="loading-text">${progress.currentTask || 'Processing...'}</div>
+          ${progress.subTask ? `<div class="loading-subtext">${progress.subTask}</div>` : ''}
           <div class="progress-bar">
-            <div class="progress-bar-fill" style="width: ${state.status.progress.percentComplete}%"></div>
+            <div class="progress-bar-fill" style="width: ${progress.percentComplete}%"></div>
           </div>
-          <div class="loading-text">${state.status.progress.percentComplete}% complete</div>
+          <div class="loading-text">${progress.percentComplete}% complete</div>
+          ${progress.itemsProcessed !== undefined && progress.itemsTotal ? `
+            <div class="loading-items">${progress.itemsProcessed} / ${progress.itemsTotal} items</div>
+          ` : ''}
+          <div class="loading-stats">
+            <span>Elapsed: ${elapsedStr}</span>
+            ${cost && cost.callCount > 0 ? `
+              <span>API Calls: ${cost.callCount}</span>
+              <span>Cost: $${cost.totalCost.toFixed(4)}</span>
+            ` : ''}
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    if (state.status && state.status.status === 'failed') {
+      const cost = state.status.cost;
+      this.innerHTML = `
+        <div class="error-container">
+          <div class="error-icon">⚠️</div>
+          <div class="error-title">Generation Failed</div>
+          <div class="error-message">${escapeHtml(state.status.error || 'Unknown error')}</div>
+          ${cost && cost.callCount > 0 ? `
+            <div class="error-cost">
+              Cost incurred: $${cost.totalCost.toFixed(4)} (${cost.callCount} API calls)
+            </div>
+          ` : ''}
+          <button class="retry-button" onclick="localStorage.removeItem('emailverse_universe_id'); location.reload();">
+            Try Again
+          </button>
         </div>
       `;
       return;
