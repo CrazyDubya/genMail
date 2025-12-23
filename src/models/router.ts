@@ -66,15 +66,15 @@ export const MODEL_PRICING: Record<ModelIdentifier, ModelPricing> = {
     provider: 'Anthropic',
   },
   'gpt-4o-mini': {
-    inputPerMillion: 0.15,
-    outputPerMillion: 0.60,
-    modelName: 'gpt-4o-mini',
+    inputPerMillion: 0.05,
+    outputPerMillion: 0.40,
+    modelName: 'gpt-5-nano', // Updated: GPT-5 nano is the budget option
     provider: 'OpenAI',
   },
   'gemini-flash': {
-    inputPerMillion: 0.10,
-    outputPerMillion: 0.40,
-    modelName: 'gemini-2.0-flash',
+    inputPerMillion: 0.50,
+    outputPerMillion: 3.0,
+    modelName: 'gemini-3-flash-preview', // Updated: Gemini 3 Flash
     provider: 'Google',
   },
   'grok-fast': {
@@ -178,7 +178,7 @@ class OpenAIClient implements ModelClient {
   private model: string;
   private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'gpt-4o-mini', modelId: ModelIdentifier = 'gpt-4o-mini') {
+  constructor(apiKey: string, model: string = 'gpt-5-nano', modelId: ModelIdentifier = 'gpt-4o-mini') {
     this.apiKey = apiKey;
     this.model = model;
     this.modelId = modelId;
@@ -239,7 +239,7 @@ class GeminiClient implements ModelClient {
   private model: string;
   private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'gemini-2.0-flash', modelId: ModelIdentifier = 'gemini-flash') {
+  constructor(apiKey: string, model: string = 'gemini-3-flash-preview', modelId: ModelIdentifier = 'gemini-flash') {
     this.apiKey = apiKey;
     this.model = model;
     this.modelId = modelId;
