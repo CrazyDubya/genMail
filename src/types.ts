@@ -38,7 +38,10 @@ export type ModelIdentifier =
   | 'gpt-4o-mini'
   | 'gemini-flash'
   | 'grok-fast'
-  | 'openrouter-cheap';
+  | 'openrouter-cheap'
+  | 'openrouter-gpt-nano'  // GPT-5.2 nano via OpenRouter (fallback for direct OpenAI)
+  | 'openrouter-haiku'    // Claude Haiku via OpenRouter (fallback)
+  | 'openrouter-flash';   // Gemini Flash via OpenRouter (fallback)
 
 export interface ModelConfig {
   anthropic: { apiKey: string };
