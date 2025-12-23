@@ -1,6 +1,61 @@
 /**
  * EmailVerse - Web Components Email Client
+ * With session management, mailbox switching, and improved mobile UI
  */
+
+// =============================================================================
+// SESSION MANAGEMENT
+// =============================================================================
+
+class SessionManager {
+  constructor() {
+    this.token = localStorage.getItem('emailverse_session_token');
+    this.sessionId = null;
+    this.initialized = false;
+  }
+
+  async initialize() {
+    if (this.initialized) return;
+
+    try {
+      const response = await fetch('/api/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.token ? { 'X-Session-Token': this.token } : {}),
+        },
+      });
+
+      const data = await response.json();
+
+      if (data.token) {
+        this.token = data.token;
+        this.sessionId = data.sessionId;
+        localStorage.setItem('emailverse_session_token', data.token);
+        this.initialized = true;
+        return data;
+      }
+    } catch (error) {
+      console.error('Failed to initialize session:', error);
+    }
+
+    return null;
+  }
+
+  getHeaders() {
+    return this.token ? { 'X-Session-Token': this.token } : {};
+  }
+
+  clearSession() {
+    this.token = null;
+    this.sessionId = null;
+    this.initialized = false;
+    localStorage.removeItem('emailverse_session_token');
+    localStorage.removeItem('emailverse_universe_id');
+  }
+}
+
+const session = new SessionManager();
 
 // =============================================================================
 // STATE MANAGEMENT
@@ -17,6 +72,8 @@ class AppState {
     this.selectedEmail = null;
     this.loading = false;
     this.status = null;
+    this.mailboxes = [];
+    this.showMailboxDrawer = false;
     this.listeners = new Set();
     // Mobile navigation state: 'folders' | 'emails' | 'view'
     this.mobileView = 'emails';
@@ -43,13 +100,44 @@ class AppState {
     this.notify();
   }
 
+  setMailboxes(mailboxes) {
+    this.mailboxes = mailboxes;
+    this.notify();
+  }
+
+  toggleMailboxDrawer() {
+    this.showMailboxDrawer = !this.showMailboxDrawer;
+    this.notify();
+  }
+
   setUniverse(universeId, data) {
     this.universeId = universeId;
     this.emails = data.emails || [];
     this.threads = data.threads || [];
     this.characters = data.characters || [];
     this.folders = data.folders || [];
+
+    // Auto-select folder with emails if current folder is empty
+    this.autoSelectFolder();
+
     this.notify();
+  }
+
+  autoSelectFolder() {
+    const currentFolderEmails = this.getEmailsForFolder();
+    if (currentFolderEmails.length === 0 && this.emails.length > 0) {
+      // Find a folder that has emails
+      const folderWithEmails = this.folders.find(f => f.count > 0);
+      if (folderWithEmails) {
+        this.selectedFolder = folderWithEmails.type;
+      } else {
+        // Fallback: check actual email folders
+        const actualFolders = [...new Set(this.emails.map(e => e.folder))];
+        if (actualFolders.length > 0) {
+          this.selectedFolder = actualFolders[0];
+        }
+      }
+    }
   }
 
   selectFolder(folder) {
@@ -92,6 +180,18 @@ class AppState {
   getCharacter(characterId) {
     return this.characters.find(c => c.id === characterId);
   }
+
+  clear() {
+    this.universeId = null;
+    this.emails = [];
+    this.threads = [];
+    this.characters = [];
+    this.folders = [];
+    this.selectedFolder = 'inbox';
+    this.selectedEmail = null;
+    this.status = null;
+    this.notify();
+  }
 }
 
 const state = new AppState();
@@ -104,14 +204,19 @@ const api = {
   async createUniverse(documents, config = {}) {
     const response = await fetch('/api/universe', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...session.getHeaders(),
+      },
       body: JSON.stringify({ documents, config }),
     });
     return response.json();
   },
 
   async getStatus(universeId) {
-    const response = await fetch(`/api/universe/${universeId}/status`);
+    const response = await fetch(`/api/universe/${universeId}/status`, {
+      headers: session.getHeaders(),
+    });
     return response.json();
   },
 
@@ -119,19 +224,58 @@ const api = {
     const url = folder
       ? `/api/universe/${universeId}/emails?folder=${folder}`
       : `/api/universe/${universeId}/emails`;
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: session.getHeaders(),
+    });
     return response.json();
   },
 
   async markRead(universeId, emailId) {
     await fetch(`/api/universe/${universeId}/emails/${emailId}/read`, {
       method: 'PATCH',
+      headers: session.getHeaders(),
     });
   },
 
   async toggleStar(universeId, emailId) {
     const response = await fetch(`/api/universe/${universeId}/emails/${emailId}/star`, {
       method: 'PATCH',
+      headers: session.getHeaders(),
+    });
+    return response.json();
+  },
+
+  async getMailboxes() {
+    const response = await fetch('/api/mailboxes', {
+      headers: session.getHeaders(),
+    });
+    return response.json();
+  },
+
+  async activateMailbox(universeId) {
+    const response = await fetch(`/api/mailboxes/${universeId}/activate`, {
+      method: 'POST',
+      headers: session.getHeaders(),
+    });
+    return response.json();
+  },
+
+  async renameMailbox(universeId, name) {
+    const response = await fetch(`/api/mailboxes/${universeId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...session.getHeaders(),
+      },
+      body: JSON.stringify({ name }),
+    });
+    return response.json();
+  },
+
+  async deleteMailbox(universeId) {
+    const response = await fetch(`/api/mailboxes/${universeId}`, {
+      method: 'DELETE',
+      headers: session.getHeaders(),
     });
     return response.json();
   },
@@ -160,6 +304,11 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function formatMailboxDate(dateString) {
+  const date = new Date(dateString);
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 // =============================================================================
 // EMAIL APP COMPONENT
 // =============================================================================
@@ -173,32 +322,75 @@ class EmailApp extends HTMLElement {
   connectedCallback() {
     this.unsubscribe = state.subscribe(() => this.render());
     this.render();
-    this.checkForExistingUniverse();
+    this.initializeApp();
   }
 
   disconnectedCallback() {
     if (this.unsubscribe) this.unsubscribe();
   }
 
-  async checkForExistingUniverse() {
-    // Check localStorage for existing universe
-    const savedId = localStorage.getItem('emailverse_universe_id');
-    if (savedId) {
-      try {
-        state.setLoading(true);
-        const status = await api.getStatus(savedId);
-        if (status.status === 'complete') {
-          const data = await api.getEmails(savedId);
-          state.setUniverse(savedId, data);
-        } else if (status.status === 'processing') {
-          state.setStatus(status);
-          this.pollStatus(savedId);
-        }
-      } catch (e) {
-        localStorage.removeItem('emailverse_universe_id');
-      } finally {
-        state.setLoading(false);
+  async initializeApp() {
+    state.setLoading(true);
+
+    // Initialize session
+    const sessionData = await session.initialize();
+
+    if (sessionData && sessionData.mailboxes && sessionData.mailboxes.length > 0) {
+      state.setMailboxes(sessionData.mailboxes);
+
+      // Find active mailbox
+      const activeMailbox = sessionData.mailboxes.find(m => m.isActive);
+      if (activeMailbox) {
+        await this.loadMailbox(activeMailbox.universeId);
       }
+    }
+
+    // Also check localStorage for backward compatibility
+    const savedId = localStorage.getItem('emailverse_universe_id');
+    if (savedId && !state.universeId) {
+      await this.checkForExistingUniverse(savedId);
+    }
+
+    state.setLoading(false);
+  }
+
+  async loadMailbox(universeId) {
+    try {
+      state.setLoading(true);
+      const status = await api.getStatus(universeId);
+
+      if (status.status === 'complete') {
+        const data = await api.getEmails(universeId);
+        state.setUniverse(universeId, data);
+        localStorage.setItem('emailverse_universe_id', universeId);
+      } else if (status.status === 'processing') {
+        state.setStatus(status);
+        this.pollStatus(universeId);
+      } else if (status.status === 'failed') {
+        state.setStatus(status);
+      }
+    } catch (e) {
+      console.error('Failed to load mailbox:', e);
+    } finally {
+      state.setLoading(false);
+    }
+  }
+
+  async checkForExistingUniverse(savedId) {
+    try {
+      state.setLoading(true);
+      const status = await api.getStatus(savedId);
+      if (status.status === 'complete') {
+        const data = await api.getEmails(savedId);
+        state.setUniverse(savedId, data);
+      } else if (status.status === 'processing') {
+        state.setStatus(status);
+        this.pollStatus(savedId);
+      }
+    } catch (e) {
+      localStorage.removeItem('emailverse_universe_id');
+    } finally {
+      state.setLoading(false);
     }
   }
 
@@ -210,25 +402,25 @@ class EmailApp extends HTMLElement {
       try {
         const status = await api.getStatus(universeId);
         state.setStatus(status);
-        consecutiveErrors = 0; // Reset on success
+        consecutiveErrors = 0;
 
         if (status.status === 'complete') {
           const data = await api.getEmails(universeId);
           state.setUniverse(universeId, data);
+          // Refresh mailboxes list
+          const mailboxesData = await api.getMailboxes();
+          state.setMailboxes(mailboxesData.mailboxes || []);
         } else if (status.status === 'failed') {
-          // Stop polling on failure - the UI will show the error
           console.error('Generation failed:', status.error);
         } else if (status.status === 'processing') {
-          setTimeout(poll, 1500); // Poll slightly faster for better feedback
+          setTimeout(poll, 1500);
         }
       } catch (e) {
         console.error('Poll failed:', e);
         consecutiveErrors++;
         if (consecutiveErrors < maxErrors) {
-          // Retry with backoff
           setTimeout(poll, 2000 * consecutiveErrors);
         } else {
-          // Show network error after too many failures
           state.setStatus({
             status: 'failed',
             error: 'Lost connection to server. Please refresh the page.',
@@ -240,12 +432,19 @@ class EmailApp extends HTMLElement {
     poll();
   }
 
+  async switchMailbox(universeId) {
+    await api.activateMailbox(universeId);
+    state.clear();
+    state.showMailboxDrawer = false;
+    await this.loadMailbox(universeId);
+  }
+
   render() {
     if (state.loading) {
       this.innerHTML = `
         <div class="loading">
           <div class="loading-spinner"></div>
-          <div class="loading-text">Loading archive...</div>
+          <div class="loading-text">Loading...</div>
         </div>
       `;
       return;
@@ -285,7 +484,7 @@ class EmailApp extends HTMLElement {
       const cost = state.status.cost;
       this.innerHTML = `
         <div class="error-container">
-          <div class="error-icon">⚠️</div>
+          <div class="error-icon">!</div>
           <div class="error-title">Generation Failed</div>
           <div class="error-message">${escapeHtml(state.status.error || 'Unknown error')}</div>
           ${cost && cost.callCount > 0 ? `
@@ -293,7 +492,7 @@ class EmailApp extends HTMLElement {
               Cost incurred: $${cost.totalCost.toFixed(4)} (${cost.callCount} API calls)
             </div>
           ` : ''}
-          <button class="retry-button" onclick="localStorage.removeItem('emailverse_universe_id'); location.reload();">
+          <button class="btn btn-primary" onclick="localStorage.removeItem('emailverse_universe_id'); location.reload();">
             Try Again
           </button>
         </div>
@@ -305,9 +504,18 @@ class EmailApp extends HTMLElement {
       this.innerHTML = `
         <header class="header">
           <div class="header-logo">
-            <h1>[RECOVERED ARCHIVE]</h1>
+            <button class="mailbox-toggle" onclick="state.toggleMailboxDrawer()">
+              <span class="hamburger"></span>
+            </button>
+            <h1>EmailVerse</h1>
           </div>
+          ${state.mailboxes.length > 0 ? `
+            <div class="header-status">
+              <span>${state.mailboxes.length} mailbox${state.mailboxes.length !== 1 ? 'es' : ''}</span>
+            </div>
+          ` : ''}
         </header>
+        ${state.showMailboxDrawer ? `<mailbox-drawer></mailbox-drawer>` : ''}
         <upload-form></upload-form>
       `;
       return;
@@ -319,24 +527,28 @@ class EmailApp extends HTMLElement {
     this.innerHTML = `
       <header class="header">
         <div class="header-logo">
-          <h1>[RECOVERED ARCHIVE]</h1>
+          <button class="mailbox-toggle" onclick="state.toggleMailboxDrawer()">
+            <span class="hamburger"></span>
+          </button>
+          <h1>EmailVerse</h1>
         </div>
         <div class="header-status">
           <span class="status-indicator"></span>
-          <span>${state.emails.length} messages recovered</span>
+          <span>${state.emails.length} messages</span>
         </div>
       </header>
+      ${state.showMailboxDrawer ? `<mailbox-drawer></mailbox-drawer>` : ''}
       <nav class="mobile-nav">
         <button class="mobile-nav-btn ${mobileView === 'folders' ? 'active' : ''}" data-view="folders">
-          <span class="icon">📁</span>
+          <span class="nav-icon">F</span>
           <span>Folders</span>
         </button>
         <button class="mobile-nav-btn ${mobileView === 'emails' ? 'active' : ''}" data-view="emails">
-          <span class="icon">📧</span>
+          <span class="nav-icon">E</span>
           <span>Emails</span>
         </button>
         <button class="mobile-nav-btn ${mobileView === 'view' ? 'active' : ''}" data-view="view" ${!state.selectedEmail ? 'disabled' : ''}>
-          <span class="icon">📄</span>
+          <span class="nav-icon">V</span>
           <span>View</span>
         </button>
       </nav>
@@ -359,6 +571,114 @@ class EmailApp extends HTMLElement {
 }
 
 // =============================================================================
+// MAILBOX DRAWER COMPONENT
+// =============================================================================
+
+class MailboxDrawer extends HTMLElement {
+  constructor() {
+    super();
+    this.unsubscribe = null;
+  }
+
+  connectedCallback() {
+    this.unsubscribe = state.subscribe(() => this.render());
+    this.render();
+    this.loadMailboxes();
+  }
+
+  disconnectedCallback() {
+    if (this.unsubscribe) this.unsubscribe();
+  }
+
+  async loadMailboxes() {
+    try {
+      const data = await api.getMailboxes();
+      state.setMailboxes(data.mailboxes || []);
+    } catch (e) {
+      console.error('Failed to load mailboxes:', e);
+    }
+  }
+
+  render() {
+    const mailboxes = state.mailboxes;
+
+    this.innerHTML = `
+      <div class="drawer-overlay" onclick="state.toggleMailboxDrawer()"></div>
+      <div class="drawer">
+        <div class="drawer-header">
+          <h2>Your Mailboxes</h2>
+          <button class="drawer-close" onclick="state.toggleMailboxDrawer()">×</button>
+        </div>
+        <div class="drawer-content">
+          ${mailboxes.length === 0 ? `
+            <div class="drawer-empty">
+              <p>No mailboxes yet</p>
+              <p class="text-muted">Upload documents to create your first mailbox</p>
+            </div>
+          ` : `
+            <div class="mailbox-list">
+              ${mailboxes.map(mb => `
+                <div class="mailbox-item ${mb.isActive ? 'active' : ''}" data-id="${mb.universeId}">
+                  <div class="mailbox-info">
+                    <div class="mailbox-name">${escapeHtml(mb.name || 'Unnamed Mailbox')}</div>
+                    <div class="mailbox-meta">
+                      ${mb.emailCount} emails • ${formatMailboxDate(mb.createdAt)}
+                      ${mb.status === 'processing' ? '<span class="badge">Generating...</span>' : ''}
+                    </div>
+                  </div>
+                  <div class="mailbox-actions">
+                    <button class="btn-icon" onclick="event.stopPropagation(); this.closest('mailbox-drawer').renameMailbox('${mb.universeId}')" title="Rename">
+                      ✎
+                    </button>
+                    <button class="btn-icon btn-danger" onclick="event.stopPropagation(); this.closest('mailbox-drawer').deleteMailbox('${mb.universeId}')" title="Delete">
+                      ×
+                    </button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          `}
+        </div>
+        <div class="drawer-footer">
+          <button class="btn btn-primary btn-block" onclick="state.toggleMailboxDrawer(); state.clear();">
+            + New Mailbox
+          </button>
+        </div>
+      </div>
+    `;
+
+    // Attach click handlers for mailbox selection
+    this.querySelectorAll('.mailbox-item').forEach(item => {
+      item.addEventListener('click', async () => {
+        const universeId = item.dataset.id;
+        const app = document.querySelector('email-app');
+        await app.switchMailbox(universeId);
+      });
+    });
+  }
+
+  async renameMailbox(universeId) {
+    const mb = state.mailboxes.find(m => m.universeId === universeId);
+    const newName = prompt('Enter new name:', mb?.name || '');
+    if (newName && newName.trim()) {
+      await api.renameMailbox(universeId, newName.trim());
+      await this.loadMailboxes();
+    }
+  }
+
+  async deleteMailbox(universeId) {
+    if (confirm('Are you sure you want to delete this mailbox? This cannot be undone.')) {
+      await api.deleteMailbox(universeId);
+      await this.loadMailboxes();
+      if (state.universeId === universeId) {
+        state.clear();
+        localStorage.removeItem('emailverse_universe_id');
+      }
+    }
+  }
+}
+
+// =============================================================================
 // UPLOAD FORM COMPONENT
 // =============================================================================
 
@@ -371,14 +691,18 @@ class UploadForm extends HTMLElement {
   render() {
     this.innerHTML = `
       <div class="upload-form">
-        <h2>Upload documents to generate your email universe</h2>
+        <div class="upload-hero">
+          <h2>Create Your Email Universe</h2>
+          <p>Upload documents to generate a network of fictional emails</p>
+        </div>
         <div class="upload-area" id="dropzone">
-          <p>Drop files here or click to select</p>
-          <p style="color: var(--text-muted); font-size: 0.9em;">PDF, TXT, MD files supported</p>
+          <div class="upload-icon">+</div>
+          <p>Drop files here or tap to select</p>
+          <p class="text-muted">PDF, TXT, MD files supported</p>
           <input type="file" id="file-input" multiple accept=".pdf,.txt,.md" style="display: none;">
         </div>
-        <div id="file-list"></div>
-        <button class="upload-button" id="generate-btn" disabled>Generate Universe</button>
+        <div id="file-list" class="file-list"></div>
+        <button class="btn btn-primary btn-lg" id="generate-btn" disabled>Generate Emails</button>
       </div>
     `;
   }
@@ -417,14 +741,26 @@ class UploadForm extends HTMLElement {
       updateFileList();
     };
 
+    const removeFile = (index) => {
+      files.splice(index, 1);
+      updateFileList();
+    };
+
     const updateFileList = () => {
       fileList.innerHTML = files.map((f, i) => `
-        <div style="display: flex; gap: 8px; align-items: center; margin: 8px 0;">
-          <span>${f.name}</span>
-          <span style="color: var(--text-muted);">(${(f.size / 1024).toFixed(1)} KB)</span>
-          <button onclick="this.parentElement.remove()" style="background: none; border: none; color: var(--error); cursor: pointer;">×</button>
+        <div class="file-item">
+          <span class="file-name">${escapeHtml(f.name)}</span>
+          <span class="file-size">${(f.size / 1024).toFixed(1)} KB</span>
+          <button class="btn-icon btn-danger" data-index="${i}">×</button>
         </div>
       `).join('');
+
+      // Add remove handlers
+      fileList.querySelectorAll('.btn-icon').forEach(btn => {
+        btn.addEventListener('click', () => {
+          removeFile(parseInt(btn.dataset.index));
+        });
+      });
 
       generateBtn.disabled = files.length === 0;
     };
@@ -459,7 +795,7 @@ class UploadForm extends HTMLElement {
       } catch (error) {
         console.error('Failed to create universe:', error);
         generateBtn.disabled = false;
-        generateBtn.textContent = 'Generate Universe';
+        generateBtn.textContent = 'Generate Emails';
       }
     });
   }
@@ -486,12 +822,12 @@ class FolderList extends HTMLElement {
 
   render() {
     const folderIcons = {
-      inbox: '📥',
-      sent: '📤',
-      newsletters: '📰',
-      spam: '🚫',
-      flagged: '⭐',
-      trash: '🗑️',
+      inbox: 'IN',
+      sent: 'SE',
+      newsletters: 'NL',
+      spam: 'SP',
+      flagged: '★',
+      trash: 'TR',
     };
 
     const folderNames = {
@@ -510,7 +846,7 @@ class FolderList extends HTMLElement {
         <div class="folder-item ${state.selectedFolder === folder.type ? 'active' : ''}"
              data-folder="${folder.type}">
           <span class="folder-name">
-            <span>${folderIcons[folder.type] || '📁'}</span>
+            <span class="folder-icon">${folderIcons[folder.type] || 'F'}</span>
             <span>${folderNames[folder.type] || folder.type}</span>
           </span>
           <span class="folder-count ${folder.unreadCount > 0 ? 'unread' : ''}">
@@ -570,22 +906,27 @@ class EmailList extends HTMLElement {
       </div>
       ${emails.length === 0 ? `
         <div class="empty-state">
+          <div class="empty-icon">📭</div>
           <p>No messages in this folder</p>
         </div>
-      ` : emails.map(email => `
-        <div class="email-item ${!email.isRead ? 'unread' : ''} ${state.selectedEmail?.id === email.id ? 'selected' : ''}"
-             data-id="${email.id}">
-          <div class="email-from">${escapeHtml(email.from.displayName)}</div>
-          <div class="email-subject">${escapeHtml(email.subject)}</div>
-          <div class="email-preview">${escapeHtml(email.body.slice(0, 80))}...</div>
-          <div class="email-meta">
-            <span>${formatDate(email.sentAt)}</span>
-            <span class="email-star ${email.isStarred ? 'starred' : ''}" data-star="${email.id}">
-              ${email.isStarred ? '★' : '☆'}
-            </span>
-          </div>
+      ` : `
+        <div class="email-items">
+          ${emails.map(email => `
+            <div class="email-item ${!email.isRead ? 'unread' : ''} ${state.selectedEmail?.id === email.id ? 'selected' : ''}"
+                 data-id="${email.id}">
+              <div class="email-from">${escapeHtml(email.from.displayName)}</div>
+              <div class="email-subject">${escapeHtml(email.subject)}</div>
+              <div class="email-preview">${escapeHtml(email.body.slice(0, 80))}...</div>
+              <div class="email-meta">
+                <span>${formatDate(email.sentAt)}</span>
+                <span class="email-star ${email.isStarred ? 'starred' : ''}" data-star="${email.id}">
+                  ${email.isStarred ? '★' : '☆'}
+                </span>
+              </div>
+            </div>
+          `).join('')}
         </div>
-      `).join('')}
+      `}
     `;
 
     // Email click handlers
@@ -648,7 +989,8 @@ class EmailView extends HTMLElement {
     if (!state.selectedEmail) {
       this.innerHTML = `
         <div class="email-view-empty">
-          Select an email to view
+          <div class="empty-icon">📧</div>
+          <p>Select an email to view</p>
         </div>
       `;
       return;
@@ -660,7 +1002,7 @@ class EmailView extends HTMLElement {
 
     const backButton = `
       <button class="mobile-back-btn" onclick="state.setMobileView('emails')">
-        ← Back to emails
+        ← Back
       </button>
     `;
 
@@ -669,9 +1011,7 @@ class EmailView extends HTMLElement {
         ${backButton}
         <div class="email-view-header">
           <div class="email-view-subject">${escapeHtml(email.subject)}</div>
-          <div style="color: var(--text-muted); font-size: 0.9em;">
-            ${thread.length} messages in thread
-          </div>
+          <div class="thread-count">${thread.length} messages in thread</div>
         </div>
         <div class="thread-container">
           ${thread.map(msg => `
@@ -679,8 +1019,8 @@ class EmailView extends HTMLElement {
               <div class="thread-message-header">
                 <div>
                   <span class="thread-message-from">${escapeHtml(msg.from.displayName)}</span>
-                  <span style="color: var(--text-muted);">
-                    to ${msg.to.map(t => escapeHtml(t.displayName)).join(', ')}
+                  <span class="thread-message-to">
+                    → ${msg.to.map(t => escapeHtml(t.displayName)).join(', ')}
                   </span>
                 </div>
                 <span class="thread-message-date">${formatDate(msg.sentAt)}</span>
@@ -712,6 +1052,7 @@ class EmailView extends HTMLElement {
 // =============================================================================
 
 customElements.define('email-app', EmailApp);
+customElements.define('mailbox-drawer', MailboxDrawer);
 customElements.define('upload-form', UploadForm);
 customElements.define('folder-list', FolderList);
 customElements.define('email-list', EmailList);

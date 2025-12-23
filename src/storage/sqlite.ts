@@ -76,6 +76,27 @@ export interface Storage {
     id: UniverseId,
     status: { phase: string; percentComplete: number; currentTask?: string }
   ): Promise<void>;
+
+  // Session operations
+  createSession(): Promise<{ sessionId: string; token: string }>;
+  getSessionByToken(token: string): Promise<{ id: string; createdAt: Date; lastActivityAt: Date } | null>;
+  updateSessionActivity(sessionId: string): Promise<void>;
+
+  // User universe operations (mailbox management)
+  addUniverseToSession(sessionId: string, universeId: UniverseId, name?: string): Promise<void>;
+  getSessionUniverses(sessionId: string): Promise<Array<{
+    universeId: UniverseId;
+    name: string | null;
+    createdAt: Date;
+    isActive: boolean;
+    emailCount: number;
+    status: string;
+  }>>;
+  setActiveUniverse(sessionId: string, universeId: UniverseId): Promise<void>;
+  getActiveUniverse(sessionId: string): Promise<UniverseId | null>;
+  isUniverseOwnedBySession(sessionId: string, universeId: UniverseId): Promise<boolean>;
+  renameUniverse(sessionId: string, universeId: UniverseId, name: string): Promise<void>;
+  deleteUniverseFromSession(sessionId: string, universeId: UniverseId): Promise<void>;
 }
 
 export class SQLiteStorage implements Storage {
@@ -179,6 +200,26 @@ export class SQLiteStorage implements Storage {
         FOREIGN KEY (universe_id) REFERENCES universes(id) ON DELETE CASCADE
       );
 
+      -- Sessions table (anonymous users)
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        token TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
+        last_activity_at TEXT NOT NULL
+      );
+
+      -- User universes junction table (links sessions to their universes/mailboxes)
+      CREATE TABLE IF NOT EXISTS user_universes (
+        session_id TEXT NOT NULL,
+        universe_id TEXT NOT NULL,
+        name TEXT,
+        created_at TEXT NOT NULL,
+        is_active INTEGER DEFAULT 0,
+        PRIMARY KEY (session_id, universe_id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (universe_id) REFERENCES universes(id) ON DELETE CASCADE
+      );
+
       -- Indexes
       CREATE INDEX IF NOT EXISTS idx_documents_universe ON documents(universe_id);
       CREATE INDEX IF NOT EXISTS idx_characters_universe ON characters(universe_id);
@@ -189,6 +230,8 @@ export class SQLiteStorage implements Storage {
       CREATE INDEX IF NOT EXISTS idx_tensions_universe ON tensions(universe_id);
       CREATE INDEX IF NOT EXISTS idx_events_universe ON events(universe_id);
       CREATE INDEX IF NOT EXISTS idx_facts_universe ON facts(universe_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+      CREATE INDEX IF NOT EXISTS idx_user_universes_session ON user_universes(session_id);
     `);
   }
 
@@ -537,6 +580,144 @@ export class SQLiteStorage implements Storage {
         'UPDATE universes SET status_phase = ?, status_percent = ?, status_task = ? WHERE id = ?'
       )
       .run(status.phase, status.percentComplete, status.currentTask ?? null, id);
+  }
+
+  // Session operations
+  async createSession(): Promise<{ sessionId: string; token: string }> {
+    const sessionId = uuid();
+    const token = uuid() + '-' + uuid(); // Longer token for security
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        'INSERT INTO sessions (id, token, created_at, last_activity_at) VALUES (?, ?, ?, ?)'
+      )
+      .run(sessionId, token, now, now);
+
+    return { sessionId, token };
+  }
+
+  async getSessionByToken(token: string): Promise<{ id: string; createdAt: Date; lastActivityAt: Date } | null> {
+    const row = this.db
+      .prepare('SELECT id, created_at, last_activity_at FROM sessions WHERE token = ?')
+      .get(token) as { id: string; created_at: string; last_activity_at: string } | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      createdAt: new Date(row.created_at),
+      lastActivityAt: new Date(row.last_activity_at),
+    };
+  }
+
+  async updateSessionActivity(sessionId: string): Promise<void> {
+    const now = new Date().toISOString();
+    this.db
+      .prepare('UPDATE sessions SET last_activity_at = ? WHERE id = ?')
+      .run(now, sessionId);
+  }
+
+  // User universe operations
+  async addUniverseToSession(sessionId: string, universeId: UniverseId, name?: string): Promise<void> {
+    const now = new Date().toISOString();
+
+    // First, set all existing universes for this session to inactive
+    this.db
+      .prepare('UPDATE user_universes SET is_active = 0 WHERE session_id = ?')
+      .run(sessionId);
+
+    // Add the new universe as active
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO user_universes (session_id, universe_id, name, created_at, is_active) VALUES (?, ?, ?, ?, 1)'
+      )
+      .run(sessionId, universeId, name ?? null, now);
+  }
+
+  async getSessionUniverses(sessionId: string): Promise<Array<{
+    universeId: UniverseId;
+    name: string | null;
+    createdAt: Date;
+    isActive: boolean;
+    emailCount: number;
+    status: string;
+  }>> {
+    const rows = this.db
+      .prepare(`
+        SELECT
+          uu.universe_id,
+          uu.name,
+          uu.created_at,
+          uu.is_active,
+          u.status_phase,
+          (SELECT COUNT(*) FROM emails WHERE universe_id = uu.universe_id) as email_count
+        FROM user_universes uu
+        LEFT JOIN universes u ON u.id = uu.universe_id
+        WHERE uu.session_id = ?
+        ORDER BY uu.created_at DESC
+      `)
+      .all(sessionId) as Array<{
+        universe_id: string;
+        name: string | null;
+        created_at: string;
+        is_active: number;
+        status_phase: string | null;
+        email_count: number;
+      }>;
+
+    return rows.map((row) => ({
+      universeId: row.universe_id as UniverseId,
+      name: row.name,
+      createdAt: new Date(row.created_at),
+      isActive: row.is_active === 1,
+      emailCount: row.email_count,
+      status: row.status_phase ?? 'unknown',
+    }));
+  }
+
+  async setActiveUniverse(sessionId: string, universeId: UniverseId): Promise<void> {
+    // Set all to inactive first
+    this.db
+      .prepare('UPDATE user_universes SET is_active = 0 WHERE session_id = ?')
+      .run(sessionId);
+
+    // Set the specified one to active
+    this.db
+      .prepare('UPDATE user_universes SET is_active = 1 WHERE session_id = ? AND universe_id = ?')
+      .run(sessionId, universeId);
+  }
+
+  async getActiveUniverse(sessionId: string): Promise<UniverseId | null> {
+    const row = this.db
+      .prepare('SELECT universe_id FROM user_universes WHERE session_id = ? AND is_active = 1')
+      .get(sessionId) as { universe_id: string } | undefined;
+
+    return row?.universe_id as UniverseId | null;
+  }
+
+  async isUniverseOwnedBySession(sessionId: string, universeId: UniverseId): Promise<boolean> {
+    const row = this.db
+      .prepare('SELECT 1 FROM user_universes WHERE session_id = ? AND universe_id = ?')
+      .get(sessionId, universeId);
+
+    return !!row;
+  }
+
+  async renameUniverse(sessionId: string, universeId: UniverseId, name: string): Promise<void> {
+    this.db
+      .prepare('UPDATE user_universes SET name = ? WHERE session_id = ? AND universe_id = ?')
+      .run(name, sessionId, universeId);
+  }
+
+  async deleteUniverseFromSession(sessionId: string, universeId: UniverseId): Promise<void> {
+    // Remove from user_universes
+    this.db
+      .prepare('DELETE FROM user_universes WHERE session_id = ? AND universe_id = ?')
+      .run(sessionId, universeId);
+
+    // Also delete the actual universe data
+    await this.deleteUniverse(universeId);
   }
 
   close(): void {

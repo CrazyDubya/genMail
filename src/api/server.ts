@@ -83,6 +83,34 @@ function initContext(): AppContext {
 
 app.use('*', cors());
 
+// Session middleware - creates or validates session token
+app.use('/api/*', async (c, next) => {
+  // Skip session check for session creation endpoint
+  if (c.req.path === '/api/session') {
+    return next();
+  }
+
+  const token = c.req.header('X-Session-Token');
+
+  if (token) {
+    const session = await ctx.storage.getSessionByToken(token);
+    if (session) {
+      c.set('sessionId', session.id);
+      // Update activity timestamp (don't await to not slow down requests)
+      ctx.storage.updateSessionActivity(session.id);
+      return next();
+    }
+  }
+
+  // No valid session - return error for protected endpoints
+  // But allow universe status checks for backward compatibility
+  if (c.req.path.includes('/status')) {
+    return next();
+  }
+
+  return c.json({ error: 'Session required. Get a session token from POST /api/session' }, 401);
+});
+
 // JSON body parser is built into Hono
 
 // =============================================================================
@@ -94,9 +122,161 @@ app.get('/health', (c) => {
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// =============================================================================
+// SESSION & MAILBOX ROUTES
+// =============================================================================
+
+// Create or get session
+app.post('/api/session', async (c) => {
+  try {
+    // Check if token provided - if valid, return existing session info
+    const existingToken = c.req.header('X-Session-Token');
+    if (existingToken) {
+      const existing = await ctx.storage.getSessionByToken(existingToken);
+      if (existing) {
+        const mailboxes = await ctx.storage.getSessionUniverses(existing.id);
+        return c.json({
+          sessionId: existing.id,
+          token: existingToken,
+          createdAt: existing.createdAt.toISOString(),
+          mailboxes,
+        });
+      }
+    }
+
+    // Create new session
+    const { sessionId, token } = await ctx.storage.createSession();
+
+    return c.json({
+      sessionId,
+      token,
+      createdAt: new Date().toISOString(),
+      mailboxes: [],
+    }, 201);
+  } catch (error) {
+    console.error('Create session error:', error);
+    return c.json({ error: 'Failed to create session' }, 500);
+  }
+});
+
+// Get mailboxes for current session
+app.get('/api/mailboxes', async (c) => {
+  const sessionId = c.get('sessionId');
+  if (!sessionId) {
+    return c.json({ error: 'Session required' }, 401);
+  }
+
+  try {
+    const mailboxes = await ctx.storage.getSessionUniverses(sessionId);
+
+    // Add generation job status for processing mailboxes
+    const mailboxesWithStatus = mailboxes.map((mb) => {
+      const job = ctx.generationJobs.get(mb.universeId);
+      return {
+        ...mb,
+        generationStatus: job ? {
+          status: job.status,
+          progress: job.progress,
+        } : null,
+      };
+    });
+
+    return c.json({ mailboxes: mailboxesWithStatus });
+  } catch (error) {
+    console.error('Get mailboxes error:', error);
+    return c.json({ error: 'Failed to get mailboxes' }, 500);
+  }
+});
+
+// Switch to a different mailbox
+app.post('/api/mailboxes/:id/activate', async (c) => {
+  const sessionId = c.get('sessionId');
+  if (!sessionId) {
+    return c.json({ error: 'Session required' }, 401);
+  }
+
+  const universeId = c.req.param('id') as UniverseId;
+
+  try {
+    // Verify ownership
+    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId, universeId);
+    if (!isOwned) {
+      return c.json({ error: 'Mailbox not found' }, 404);
+    }
+
+    await ctx.storage.setActiveUniverse(sessionId, universeId);
+
+    return c.json({ success: true, activeUniverseId: universeId });
+  } catch (error) {
+    console.error('Activate mailbox error:', error);
+    return c.json({ error: 'Failed to activate mailbox' }, 500);
+  }
+});
+
+// Rename a mailbox
+app.patch('/api/mailboxes/:id', async (c) => {
+  const sessionId = c.get('sessionId');
+  if (!sessionId) {
+    return c.json({ error: 'Session required' }, 401);
+  }
+
+  const universeId = c.req.param('id') as UniverseId;
+  const body = await c.req.json<{ name: string }>();
+
+  try {
+    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId, universeId);
+    if (!isOwned) {
+      return c.json({ error: 'Mailbox not found' }, 404);
+    }
+
+    await ctx.storage.renameUniverse(sessionId, universeId, body.name);
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Rename mailbox error:', error);
+    return c.json({ error: 'Failed to rename mailbox' }, 500);
+  }
+});
+
+// Delete a mailbox
+app.delete('/api/mailboxes/:id', async (c) => {
+  const sessionId = c.get('sessionId');
+  if (!sessionId) {
+    return c.json({ error: 'Session required' }, 401);
+  }
+
+  const universeId = c.req.param('id') as UniverseId;
+
+  try {
+    const isOwned = await ctx.storage.isUniverseOwnedBySession(sessionId, universeId);
+    if (!isOwned) {
+      return c.json({ error: 'Mailbox not found' }, 404);
+    }
+
+    await ctx.storage.deleteUniverseFromSession(sessionId, universeId);
+
+    // Remove from generation jobs if present
+    ctx.generationJobs.delete(universeId);
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Delete mailbox error:', error);
+    return c.json({ error: 'Failed to delete mailbox' }, 500);
+  }
+});
+
+// =============================================================================
+// UNIVERSE ROUTES
+// =============================================================================
+
 // Create universe
 app.post('/api/universe', async (c) => {
   try {
+    const sessionId = c.get('sessionId');
+    if (!sessionId) {
+      return c.json({ error: 'Session required' }, 401);
+    }
+
     const body = await c.req.json<CreateUniverseRequest>();
 
     if (!body.documents || body.documents.length === 0) {
@@ -119,6 +299,10 @@ app.post('/api/universe', async (c) => {
     };
 
     const universeId = await ctx.storage.createUniverse(config);
+
+    // Link universe to session with optional name
+    const mailboxName = body.documents[0]?.filename?.replace(/\.[^.]+$/, '') ?? 'New Mailbox';
+    await ctx.storage.addUniverseToSession(sessionId, universeId, mailboxName);
 
     // Start generation job
     const job: GenerationJob = {
