@@ -66,9 +66,9 @@ export const MODEL_PRICING: Record<ModelIdentifier, ModelPricing> = {
     provider: 'Anthropic',
   },
   'gpt-4o-mini': {
-    inputPerMillion: 0.05,
+    inputPerMillion: 0.10,
     outputPerMillion: 0.40,
-    modelName: 'gpt-5-nano', // Updated: GPT-5 nano is the budget option
+    modelName: 'gpt-4.1-nano', // Correct model name (GPT-5 doesn't exist)
     provider: 'OpenAI',
   },
   'gemini-flash': {
@@ -84,15 +84,15 @@ export const MODEL_PRICING: Record<ModelIdentifier, ModelPricing> = {
     provider: 'xAI',
   },
   'openrouter-cheap': {
-    inputPerMillion: 0.05,
-    outputPerMillion: 0.10,
-    modelName: 'deepseek/deepseek-chat',
+    inputPerMillion: 0.0015,
+    outputPerMillion: 0.075,
+    modelName: 'deepseek/deepseek-chat-v3.1',  // Updated to v3.1 (latest and cheaper)
     provider: 'OpenRouter',
   },
   'openrouter-gpt-nano': {
-    inputPerMillion: 0.10,
-    outputPerMillion: 0.50,
-    modelName: 'openai/gpt-5.2-nano',  // GPT-5.2 nano via OpenRouter
+    inputPerMillion: 0.0,
+    outputPerMillion: 0.0,
+    modelName: 'meta-llama/llama-4-maverick:free',  // Free Llama 4 model via OpenRouter
     provider: 'OpenRouter',
   },
   'openrouter-haiku': {
@@ -196,7 +196,7 @@ class OpenAIClient implements ModelClient {
   private model: string;
   private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'gpt-5-nano', modelId: ModelIdentifier = 'gpt-4o-mini') {
+  constructor(apiKey: string, model: string = 'gpt-4.1-nano', modelId: ModelIdentifier = 'gpt-4o-mini') {
     this.apiKey = apiKey;
     this.model = model;
     this.modelId = modelId;
@@ -220,7 +220,7 @@ class OpenAIClient implements ModelClient {
         ],
         // Use max_completion_tokens for newer OpenAI models (GPT-4o+)
         max_completion_tokens: options.maxTokens ?? 2048,
-        temperature: options.temperature ?? 0.7,
+        temperature: 1.0, // GPT-4.1-nano only supports temperature 1.0
         stop: options.stopSequences,
       }),
     });
@@ -379,7 +379,7 @@ class OpenRouterClient implements ModelClient {
   private model: string;
   private modelId: ModelIdentifier;
 
-  constructor(apiKey: string, model: string = 'deepseek/deepseek-chat', modelId: ModelIdentifier = 'openrouter-cheap') {
+  constructor(apiKey: string, model: string = 'deepseek/deepseek-chat-v3.1', modelId: ModelIdentifier = 'openrouter-cheap') {
     this.apiKey = apiKey;
     this.model = model;
     this.modelId = modelId;
@@ -489,7 +489,7 @@ export class ModelRouter {
       // Add OpenRouter fallback models for resilience
       this.clients.set(
         'openrouter-gpt-nano',
-        new OpenRouterClient(config.openrouter.apiKey, 'openai/gpt-5.2-nano', 'openrouter-gpt-nano')
+        new OpenRouterClient(config.openrouter.apiKey, 'meta-llama/llama-4-maverick:free', 'openrouter-gpt-nano')
       );
       this.clients.set(
         'openrouter-haiku',
@@ -1078,7 +1078,7 @@ export function createModelRouter(config?: Partial<ModelConfig>): ModelRouter {
     openrouter: {
       apiKey: config?.openrouter?.apiKey ?? process.env.OPENROUTER_API_KEY ?? '',
       defaultModel:
-        config?.openrouter?.defaultModel ?? 'deepseek/deepseek-chat', // Updated to DeepSeek for better cost efficiency
+        config?.openrouter?.defaultModel ?? 'deepseek/deepseek-chat-v3.1', // DeepSeek v3.1 is latest and cheaper
     },
   };
 
