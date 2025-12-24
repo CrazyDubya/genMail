@@ -38,7 +38,7 @@ jobs:
         if: matrix.node-version == 20
 
       - name: Upload coverage reports
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         if: matrix.node-version == 20
         with:
           file: ./coverage/coverage-final.json
