@@ -33,6 +33,18 @@ interface TickOptions {
 }
 
 // =============================================================================
+// THREAD ANALYSIS (Semantic understanding of conversations)
+// =============================================================================
+
+interface ThreadAnalysis {
+  topicsCovered: string[];
+  participantPositions: Array<{ name: string; position: string }>;
+  openQuestions: string[];
+  suggestedDirection: string;
+  emotionalTone: string;
+}
+
+// =============================================================================
 // EVENT PLANNING
 // =============================================================================
 
@@ -594,6 +606,74 @@ function findUnansweredPoints(
   return unanswered.slice(0, 4);
 }
 
+/**
+ * Analyze thread semantically using LLM to understand conversation flow.
+ * This provides deep understanding of what's been discussed and what should come next.
+ */
+async function analyzeThread(
+  threadEmails: Email[],
+  sender: Character,
+  world: WorldState,
+  router: ModelRouter
+): Promise<ThreadAnalysis | null> {
+  // Only analyze if there are previous emails
+  if (threadEmails.length === 0) {
+    return null;
+  }
+
+  // Build conversation transcript
+  const transcript = threadEmails.map((e) => {
+    const senderChar = world.characters.find((c) => c.id === e.from.characterId);
+    return `[${senderChar?.name ?? e.from.displayName}]: ${e.body}`;
+  }).join('\n\n');
+
+  // Get document context for grounding
+  const docContext = world.documents[0]?.context;
+  const documentThesis = docContext?.thesis ?? '';
+  const coreConcepts = docContext?.coreConcepts ?? [];
+
+  const prompt = `Analyze this email thread to help a participant write a meaningful response.
+
+DOCUMENT BEING DISCUSSED:
+Thesis: ${documentThesis}
+Key concepts: ${coreConcepts.join(', ')}
+
+EMAIL THREAD:
+${transcript}
+
+NEXT SENDER: ${sender.name} (${sender.archetype})
+
+Analyze and provide:
+1. What specific topics/points have been covered (not vague summaries)
+2. Each participant's position/stance on the document
+3. Open questions that need responses
+4. What direction would advance this conversation productively
+
+Respond with JSON:
+{
+  "topicsCovered": ["specific topic 1", "specific topic 2"],
+  "participantPositions": [
+    {"name": "Person Name", "position": "Their specific stance"}
+  ],
+  "openQuestions": ["Actual question from thread?"],
+  "suggestedDirection": "What ${sender.name} should focus on to advance the discussion",
+  "emotionalTone": "collaborative|contentious|neutral|enthusiastic"
+}`;
+
+  try {
+    // Use a fast model for thread analysis to avoid adding too much latency
+    const result = await router.generateStructured<ThreadAnalysis>(
+      'claude-haiku',
+      prompt,
+      { temperature: 0.3 }
+    );
+    return result;
+  } catch (error) {
+    console.warn('[Thread Analysis] Failed, proceeding without:', error);
+    return null;
+  }
+}
+
 async function generateEmail(
   sender: Character,
   recipients: Character[],
@@ -612,16 +692,46 @@ async function generateEmail(
     .filter((e) => e.threadId === thread.id)
     .sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime());
 
-  // Get previous messages for basic context (last 3 for the prompt)
+  // Get previous messages - use MORE context (last 5 instead of 3)
   const previousMessages = inReplyTo
-    ? threadEmails.slice(-3).map((e) => `From: ${e.from.displayName}\n${e.body}`)
+    ? threadEmails.slice(-5).map((e) => {
+        const senderChar = world.characters.find((c) => c.id === e.from.characterId);
+        return `From: ${senderChar?.name ?? e.from.displayName}\n${e.body}`;
+      })
     : [];
 
-  // NEW: Build enhanced context
+  // Build enhanced context
   const { pointsAlreadyMade } = buildSenderHistoryContext(sender.id, threadEmails);
   const unansweredPoints = findUnansweredPoints(sender.id, threadEmails);
 
-  // Build prompt with enhanced context
+  // SEMANTIC THREAD ANALYSIS: Use LLM to understand conversation before generating
+  let threadAnalysis: ThreadAnalysis | null = null;
+  if (threadEmails.length > 0 && sender.archetype !== 'spammer' && sender.archetype !== 'newsletter_curator') {
+    threadAnalysis = await analyzeThread(threadEmails, sender, world, router);
+
+    // Update thread's conversation state with the analysis
+    if (threadAnalysis && thread.conversationState) {
+      thread.conversationState.discussedTopics = threadAnalysis.topicsCovered;
+      // Map open questions to PendingQuestion format
+      // Use the last email's sender as the asker since we don't know who specifically asked
+      const lastEmail = threadEmails[threadEmails.length - 1];
+      thread.conversationState.pendingQuestions = threadAnalysis.openQuestions.map((q) => ({
+        question: q,
+        askedBy: lastEmail?.from.characterId ?? sender.id,
+        askedInEmail: lastEmail?.id ?? ('' as EmailId),
+      }));
+      thread.conversationState.currentFocus = threadAnalysis.suggestedDirection;
+      // Update participant positions
+      for (const pos of threadAnalysis.participantPositions) {
+        const charId = world.characters.find((c) => c.name === pos.name)?.id;
+        if (charId) {
+          thread.conversationState.pointsByParticipant[charId] = [pos.position];
+        }
+      }
+    }
+  }
+
+  // Build prompt with enhanced context including thread analysis
   const prompt = buildEmailPrompt(
     sender,
     recipients,
@@ -630,7 +740,8 @@ async function generateEmail(
     previousMessages,
     world,
     pointsAlreadyMade,
-    unansweredPoints
+    unansweredPoints,
+    threadAnalysis ?? undefined
   );
 
   // Generate using character's bound model
@@ -705,17 +816,21 @@ function buildEmailPrompt(
   previousMessages: string[],
   world: WorldState,
   pointsAlreadyMade: string[] = [],
-  unansweredPoints: string[] = []
+  unansweredPoints: string[] = [],
+  threadAnalysis?: ThreadAnalysis
 ): string {
   const recipientNames = recipients.map((r) => r.name).join(', ');
 
-  // Get document context if available
+  // Get document context if available - use MUCH more context
   const docContext = world.documents[0]?.context;
   const documentThesis = docContext?.thesis ?? '';
+  const documentSummary = docContext?.summary ?? '';
   const documentSignificance = docContext?.significance ?? '';
+  const documentClaims = docContext?.claims ?? [];
+  const coreConcepts = docContext?.coreConcepts ?? [];
 
-  // Include sender's actual knowledge
-  const senderKnowledge = sender.knows.slice(0, 5).join('\n- ');
+  // Include sender's full knowledge - don't truncate
+  const senderKnowledge = sender.knows.join('\n- ');
 
   let contextInfo = '';
 
@@ -745,29 +860,45 @@ function buildEmailPrompt(
   // Special handling for archetypes
   if (sender.archetype === 'newsletter_curator') {
     const themes = world.documents.flatMap((d) => d.themes).slice(0, 4);
-    const concepts = world.documents.flatMap((d) => d.concepts ?? []).slice(0, 6);
+    const concepts = world.documents.flatMap((d) => d.concepts ?? []).slice(0, 8);
 
-    return `Write a newsletter email about this document.
+    return `Write a newsletter email about this document. Be substantive and specific.
 
-DOCUMENT OVERVIEW:
+═══════════════════════════════════════════════════════════════════════════════
+DOCUMENT CONTENT (understand this thoroughly before writing)
+═══════════════════════════════════════════════════════════════════════════════
+
+MAIN THESIS:
 ${documentThesis}
+
+FULL SUMMARY:
+${documentSummary.slice(0, 1200)}
 
 KEY TOPICS:
 ${themes.map((t) => `- ${t.name}: ${t.description}`).join('\n')}
 
-KEY CONCEPTS TO DISCUSS (pick 2-3 to focus on):
-${concepts.map((c) => `- ${c.name}: ${c.definition.slice(0, 200)}`).join('\n')}
+KEY CONCEPTS (pick 2-3 to focus on deeply):
+${concepts.map((c) => `- ${c.name}: ${c.definition?.slice(0, 250) ?? 'Core concept'}`).join('\n')}
+
+KEY CLAIMS FROM THE DOCUMENT:
+${documentClaims.slice(0, 3).map((c) => `• ${c.statement}`).join('\n')}
 
 WHY THIS MATTERS:
-${documentSignificance.slice(0, 200)}
+${documentSignificance}
+
+═══════════════════════════════════════════════════════════════════════════════
+WRITING REQUIREMENTS
+═══════════════════════════════════════════════════════════════════════════════
 
 Write an informative newsletter that:
-- Explains the main thesis in accessible, engaging terms
-- Dives deep into 2-3 key concepts with real technical substance
-- Connects the ideas to practical implications or applications
-- Uses varied language - avoid corporate buzzwords like "synergy", "leverage", "circle back"
+1. Opens with a hook that captures the document's significance
+2. Explains the main thesis in accessible but technically accurate terms
+3. Dives DEEP into 2-3 key concepts - use actual terminology and specific details
+4. Includes at least one specific claim or finding from the document
+5. Connects the ideas to practical implications
+6. Avoids vague corporate buzzwords - be concrete and specific
 
-Keep it well-structured with clear sections. Length: 200-300 words.`;
+Length: 200-300 words. Substance over fluff.`;
   }
 
   if (sender.archetype === 'spammer') {
@@ -775,19 +906,68 @@ Keep it well-structured with clear sections. Length: 200-300 words.`;
 Include vague urgency and a call to action. Length: 50-100 words.`;
   }
 
+  // Build rich document context section
+  let documentSection = '';
+  if (documentThesis) {
+    documentSection = `
+═══════════════════════════════════════════════════════════════════════════════
+DOCUMENT YOU'RE DISCUSSING (understand this deeply before writing)
+═══════════════════════════════════════════════════════════════════════════════
+
+MAIN THESIS:
+${documentThesis}
+
+DOCUMENT SUMMARY:
+${documentSummary.slice(0, 1500)}
+
+KEY CONCEPTS (reference these specifically):
+${coreConcepts.slice(0, 8).map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+KEY CLAIMS FROM THE DOCUMENT:
+${documentClaims.slice(0, 4).map((c) => `• ${c.statement} (Evidence: ${c.evidence?.slice(0, 2).join('; ') ?? 'stated'})`).join('\n')}
+
+WHY THIS MATTERS:
+${documentSignificance}
+`;
+  }
+
+  // Build thread analysis section (semantic understanding of conversation)
+  let threadAnalysisSection = '';
+  if (threadAnalysis) {
+    threadAnalysisSection = `
+═══════════════════════════════════════════════════════════════════════════════
+CONVERSATION ANALYSIS (what's been discussed so far)
+═══════════════════════════════════════════════════════════════════════════════
+
+TOPICS ALREADY COVERED (don't rehash):
+${threadAnalysis.topicsCovered.map((t) => `• ${t}`).join('\n') || '(None yet - this starts a new discussion)'}
+
+POSITIONS BY PARTICIPANT:
+${threadAnalysis.participantPositions.map((p) => `• ${p.name}: ${p.position}`).join('\n') || '(No positions established yet)'}
+
+OPEN QUESTIONS NEEDING RESPONSE:
+${threadAnalysis.openQuestions.map((q) => `• ${q}`).join('\n') || '(No open questions)'}
+
+SUGGESTED NEXT DIRECTION:
+${threadAnalysis.suggestedDirection}
+`;
+  }
+
   // Build anti-repetition section
   let antiRepetitionSection = '';
   if (pointsAlreadyMade.length > 0) {
     antiRepetitionSection = `
-⚠️ CRITICAL - DO NOT REPEAT THESE POINTS (you've already made them in this thread):
-${pointsAlreadyMade.slice(0, 5).map((p) => `- "${p.slice(0, 80)}..."`).join('\n')}
+═══════════════════════════════════════════════════════════════════════════════
+⚠️ CRITICAL - YOUR PREVIOUS POINTS IN THIS THREAD (DO NOT REPEAT)
+═══════════════════════════════════════════════════════════════════════════════
+${pointsAlreadyMade.slice(0, 5).map((p) => `❌ "${p.slice(0, 100)}"`).join('\n')}
 
-You MUST take a DIFFERENT angle. Options:
-- Respond to what others have said
-- Ask a new question
-- Bring up a different aspect of the document
-- Share a concrete example or implication
-- Acknowledge a counterpoint and address it
+You MUST take a DIFFERENT angle:
+• Respond to what others specifically said
+• Ask a new question you haven't asked
+• Bring up a different aspect of ${coreConcepts[0] ?? 'the document'}
+• Share a concrete example or implication
+• Challenge or build on someone else's point
 `;
   }
 
@@ -795,50 +975,59 @@ You MUST take a DIFFERENT angle. Options:
   let responseSection = '';
   if (unansweredPoints.length > 0) {
     responseSection = `
-📝 RESPOND TO THESE (from other participants):
-${unansweredPoints.map((p) => `- ${p.slice(0, 100)}`).join('\n')}
+═══════════════════════════════════════════════════════════════════════════════
+📝 RESPOND TO THESE (from other participants - they're waiting for your input)
+═══════════════════════════════════════════════════════════════════════════════
+${unansweredPoints.map((p) => `→ ${p.slice(0, 150)}`).join('\n')}
 
-Address at least one of these points before making new arguments.
+Address at least one of these BEFORE making new arguments.
 `;
   }
 
-  // Build thread context
+  // Build thread context with full messages
   let threadContext = '';
   if (previousMessages.length > 0) {
     threadContext = `
-RECENT THREAD MESSAGES:
+═══════════════════════════════════════════════════════════════════════════════
+CONVERSATION SO FAR (read carefully and respond to actual content)
+═══════════════════════════════════════════════════════════════════════════════
 ${previousMessages.join('\n---\n')}
 
-This is a REPLY. You must:
-1. Acknowledge or respond to something specific from the last message
-2. Advance the conversation (don't just restate)
-3. Either answer a question, ask a new one, or provide new information
+This is a REPLY. You MUST:
+1. Quote or paraphrase something specific from the last message
+2. Directly respond to that point (agree, disagree, ask for clarification)
+3. Then add ONE new insight, question, or proposal
 `;
   } else {
-    threadContext = '\nThis is a NEW email starting a conversation.\n';
+    threadContext = `
+This is a NEW conversation. Start by:
+1. Stating your main point or question clearly
+2. Grounding it in specific document content
+3. Inviting a specific response from ${recipientNames}
+`;
   }
 
-  // Enhanced prompt with all context
-  return `Write an email to ${recipientNames}.
+  // Enhanced prompt with full context
+  return `You are ${sender.name}. Write an email to ${recipientNames}.
 Subject: ${subject}
 ${contextInfo}
+${documentSection}
+YOUR KNOWLEDGE AND PERSPECTIVE:
+${senderKnowledge ? `- ${senderKnowledge}` : 'General understanding of the topic'}
+${threadContext}${threadAnalysisSection}${antiRepetitionSection}${responseSection}
+═══════════════════════════════════════════════════════════════════════════════
+WRITING REQUIREMENTS
+═══════════════════════════════════════════════════════════════════════════════
 
-DOCUMENT CONTEXT (what you're discussing):
-${documentThesis.slice(0, 400)}
+1. Reference SPECIFIC concepts from the document (use actual terms like "${coreConcepts[0] ?? 'the key concept'}")
+2. If replying, start by engaging with what the last person ACTUALLY said
+3. Each email must have ONE clear purpose - don't ramble
+4. Write as ${sender.name} - match their personality and perspective
+5. Be concrete: use specific examples, numbers, or quotes from the document
+6. Ask a genuine question or make a genuine point - don't just fill space
 
-YOUR KNOWLEDGE (draw from this):
-- ${senderKnowledge || 'General understanding of the topic'}
-${threadContext}${antiRepetitionSection}${responseSection}
-Event triggering this email: ${event.description}
-
-WRITING GUIDELINES:
-1. Reference SPECIFIC concepts from the document - be concrete, not vague
-2. If replying, directly engage with what others said (agree, disagree, build on, question)
-3. Each email must have a DISTINCT purpose - don't just restate previous points
-4. Write naturally as ${sender.name} - match their voice and perspective
-5. Keep it focused - one main point or question, well-developed
-
-Length: 75-150 words.`;
+Trigger for this email: ${event.description}
+Length: 75-150 words. Quality over quantity.`;
 }
 
 function getEmailType(sender: Character, event: PlannedEvent): Email['type'] {
