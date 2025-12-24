@@ -20,6 +20,7 @@ import type {
   EmailId,
   ThreadId,
   Theme,
+  DocumentContext,
 } from '../types.js';
 import type { ModelRouter } from '../models/router.js';
 
@@ -99,6 +100,23 @@ async function planTickEvents(
   );
 
   for (const character of activeCharacters.slice(0, targetEvents - events.length)) {
+    // Skip characters who are waiting for responses in their threads
+    // This prevents one character from dominating the conversation
+    const characterThreads = world.emails
+      .filter((e) => e.from.characterId === character.id)
+      .map((e) => e.threadId);
+
+    const uniqueThreads = [...new Set(characterThreads)];
+    const waitingForResponse = uniqueThreads.some((threadId) => {
+      const threadEmails = world.emails.filter((e) => e.threadId === threadId);
+      const lastEmail = threadEmails[threadEmails.length - 1];
+      return lastEmail?.from.characterId === character.id;
+    });
+
+    // 70% chance to skip characters waiting for response - gives others a turn
+    if (waitingForResponse && Math.random() > 0.3) {
+      continue;
+    }
     // Check if character has urgent goals
     const urgentGoal = character.goals.find((g) => g.priority === 'immediate');
 
@@ -315,11 +333,33 @@ function getThreadOriginType(threadEmails: Email[], world: WorldState): Thread['
 }
 
 /**
- * Check if the sender has already made too many contributions to this thread.
- * Helps prevent one character from dominating a conversation.
+ * Check if a thread has unbalanced participation (one person dominating).
+ * Returns true if the sender should NOT add to this thread.
+ * This prevents monologue threads where one person sends multiple messages
+ * without any responses from others.
  */
-function getSenderContributionCount(threadEmails: Email[], senderId: CharacterId): number {
-  return threadEmails.filter((e) => e.from.characterId === senderId).length;
+function hasUnbalancedParticipation(
+  threadEmails: Email[],
+  senderId: CharacterId
+): boolean {
+  if (threadEmails.length < 2) return false;
+
+  // Block if last 2 messages are from same sender (consecutive messages without response)
+  const lastTwoFromSender = threadEmails.slice(-2).every(
+    (e) => e.from.characterId === senderId
+  );
+  if (lastTwoFromSender) return true;
+
+  // Check overall balance - if sender has 2+ more messages than responses received
+  const senderCount = threadEmails.filter(
+    (e) => e.from.characterId === senderId
+  ).length;
+  const otherCount = threadEmails.length - senderCount;
+
+  // If sender has sent 2+ more messages than they've received responses, stop
+  if (senderCount >= otherCount + 2) return true;
+
+  return false;
 }
 
 function findRelatedThread(
@@ -353,11 +393,10 @@ function findRelatedThread(
       continue;
     }
 
-    // NEW: Check if sender has already contributed too much to this thread
-    const senderContributions = getSenderContributionCount(threadEmails, sender.id);
-    if (senderContributions >= 3) {
-      // This sender has sent 3+ emails to this thread - force them to wait for responses
-      // or start a new thread
+    // Check if this thread has unbalanced participation
+    // This prevents monologue threads where one person dominates
+    if (hasUnbalancedParticipation(threadEmails, sender.id)) {
+      // This sender needs to wait for responses before adding more
       continue;
     }
 
@@ -755,11 +794,45 @@ async function generateEmail(
       characterKnowledge: sender.knows,
     });
   } catch (error) {
-    // Fallback to varied template-based message
+    // Fallback to varied template-based message with document context
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.warn(`[Email Generation] LLM failed for ${sender.name} (${sender.archetype}), using fallback. Error: ${errorMsg}`);
-    body = generateFallbackEmail(sender, event);
+    const modelId = sender.voiceBinding.modelId;
+
+    // Categorize the error for better diagnostics
+    let errorType: 'api_unavailable' | 'rate_limit' | 'invalid_request' | 'unknown' = 'unknown';
+    if (errorMsg.includes('401') || errorMsg.includes('403') || errorMsg.includes('unavailable')) {
+      errorType = 'api_unavailable';
+    } else if (errorMsg.includes('429') || errorMsg.includes('rate')) {
+      errorType = 'rate_limit';
+    } else if (errorMsg.includes('400') || errorMsg.includes('invalid')) {
+      errorType = 'invalid_request';
+    }
+
+    console.error(`[Email Generation] FAILED
+    Character: ${sender.name} (${sender.archetype})
+    Model: ${modelId}
+    Error Type: ${errorType}
+    Error: ${errorMsg}
+    Event: ${event.description}
+    Thread: ${thread.subject}`);
+
+    // Pass document context to fallback for better quality
+    body = generateFallbackEmail(sender, event, world.documents[0]?.context);
     usedFallback = true;
+  }
+
+  // Validate document content was used (only for non-fallback, non-spam/newsletter)
+  const docContext = world.documents[0]?.context;
+  if (!usedFallback && docContext?.coreConcepts?.length &&
+      sender.archetype !== 'spammer' && sender.archetype !== 'newsletter_curator') {
+    const emailLower = body.toLowerCase();
+    const usedAnyConcept = docContext.coreConcepts.some(
+      (concept) => emailLower.includes(concept.toLowerCase().slice(0, 12))
+    );
+
+    if (!usedAnyConcept) {
+      console.warn(`[Email] WARNING: ${sender.name}'s email doesn't reference any document concepts`);
+    }
   }
 
   // Log generation method for debugging
@@ -906,28 +979,35 @@ Length: 200-300 words. Substance over fluff.`;
 Include vague urgency and a call to action. Length: 50-100 words.`;
   }
 
-  // Build rich document context section
+  // Build rich document context section - CRITICAL for grounding emails in document
   let documentSection = '';
   if (documentThesis) {
+    // Pick specific concepts to focus on (for variety between emails)
+    const focusConcepts = coreConcepts.slice(0, 4);
+    const focusClaim = documentClaims[Math.floor(Math.random() * Math.min(3, documentClaims.length))];
+
     documentSection = `
 ═══════════════════════════════════════════════════════════════════════════════
-DOCUMENT YOU'RE DISCUSSING (understand this deeply before writing)
+⚠️ CRITICAL: YOUR EMAIL MUST REFERENCE THIS DOCUMENT ⚠️
 ═══════════════════════════════════════════════════════════════════════════════
 
-MAIN THESIS:
-${documentThesis}
+THESIS: "${documentThesis}"
 
-DOCUMENT SUMMARY:
-${documentSummary.slice(0, 1500)}
+PICK AT LEAST ONE TO REFERENCE IN YOUR EMAIL:
+${focusConcepts.map((c) => `• ${c}`).join('\n')}
+${focusClaim ? `• CLAIM: ${focusClaim.statement}` : ''}
 
-KEY CONCEPTS (reference these specifically):
-${coreConcepts.slice(0, 8).map((c, i) => `${i + 1}. ${c}`).join('\n')}
+WHY THIS MATTERS: ${documentSignificance?.slice(0, 200) ?? 'Important findings'}
 
-KEY CLAIMS FROM THE DOCUMENT:
-${documentClaims.slice(0, 4).map((c) => `• ${c.statement} (Evidence: ${c.evidence?.slice(0, 2).join('; ') ?? 'stated'})`).join('\n')}
+═══════════════════════════════════════════════════════════════════════════════
+DOCUMENT SUMMARY (for context):
+${documentSummary.slice(0, 800)}
+═══════════════════════════════════════════════════════════════════════════════
 
-WHY THIS MATTERS:
-${documentSignificance}
+YOUR EMAIL MUST:
+1. Name-drop at least one concept from above
+2. Reference or react to the thesis
+3. NOT use generic phrases like "Q4 launch" or "Series B" unless in document
 `;
   }
 
@@ -1037,7 +1117,11 @@ function getEmailType(sender: Character, event: PlannedEvent): Email['type'] {
   return 'standalone';
 }
 
-function generateFallbackEmail(sender: Character, event: PlannedEvent): string {
+function generateFallbackEmail(
+  sender: Character,
+  event: PlannedEvent,
+  docContext?: DocumentContext
+): string {
   const greetings = sender.voiceBinding.voiceProfile.greetingPatterns;
   const signoffs = sender.voiceBinding.voiceProfile.signoffPatterns;
   const quirks = sender.voiceBinding.voiceProfile.quirks;
@@ -1047,8 +1131,8 @@ function generateFallbackEmail(sender: Character, event: PlannedEvent): string {
   const greeting = greetings[Math.floor(Math.random() * greetings.length)] ?? 'Hi';
   const signoff = signoffs[Math.floor(Math.random() * signoffs.length)] ?? 'Best';
 
-  // Generate content based on archetype
-  const body = generateArchetypeSpecificBody(sender, event, vocab, quirks);
+  // Generate content based on archetype, with document context
+  const body = generateArchetypeSpecificBody(sender, event, vocab, quirks, docContext);
 
   return `${greeting},
 
@@ -1062,35 +1146,46 @@ function generateArchetypeSpecificBody(
   sender: Character,
   event: PlannedEvent,
   vocab: string[],
-  quirks: string[]
+  quirks: string[],
+  docContext?: DocumentContext
 ): string {
   const topic = event.description.toLowerCase();
   const randomVocab = vocab.length > 0 ? vocab[Math.floor(Math.random() * vocab.length)] : '';
   const hasQuirk = quirks.length > 0 && Math.random() > 0.5;
   const quirk = hasQuirk ? ` ${quirks[Math.floor(Math.random() * quirks.length)]}` : '';
 
-  // Newsletter curator - detailed, informative content
+  // Extract document content for use in fallbacks
+  const thesis = docContext?.thesis ?? '';
+  const concepts = docContext?.coreConcepts?.slice(0, 3) ?? [];
+  const claims = docContext?.claims?.slice(0, 2) ?? [];
+
+  // Newsletter curator - use actual document content
   if (sender.archetype === 'newsletter_curator') {
+    // If we have document context, use it for a substantive newsletter
+    if (thesis || concepts.length > 0) {
+      const conceptList = concepts.length > 0
+        ? `Key topics this week: ${concepts.join(', ')}.`
+        : '';
+      const claimHighlight = claims.length > 0 && claims[0]?.statement
+        ? `\n\nNotable finding: ${claims[0].statement.slice(0, 200)}`
+        : '';
+
+      return `This week's focus: ${thesis ? thesis.slice(0, 150) : 'recent developments'}.
+
+${conceptList}${claimHighlight}
+
+More insights coming soon.${quirk}`;
+    }
+
+    // Fallback without document context
     const sections = [
       `This week has been eventful! Here's what's happening with ${topic}.`,
-      `We've got some exciting updates to share regarding ${topic}.`,
+      `We've got some updates to share regarding ${topic}.`,
       `Time for your regular briefing on ${topic}.`,
-    ];
-    const details = [
-      `Several developments have caught our attention. The team has been working hard on key initiatives, and we're seeing real progress.`,
-      `Things are moving forward nicely. We've hit some milestones and there's momentum building.`,
-      `There's been good activity across the board. Multiple projects are advancing and new opportunities are emerging.`,
-    ];
-    const closings = [
-      `Stay tuned for more updates next week. As always, reach out if you have questions.`,
-      `More to come soon. Keep an eye out for announcements.`,
-      `That's all for now. Looking forward to sharing more progress with you.`,
     ];
     return `${sections[Math.floor(Math.random() * sections.length)]}
 
-${details[Math.floor(Math.random() * details.length)]}
-
-${closings[Math.floor(Math.random() * closings.length)]}${quirk}`;
+More details coming soon.${quirk}`;
   }
 
   // Spammer - promotional, urgent
@@ -1351,6 +1446,30 @@ export async function runSimulation(
       currentWorld,
       router,
       new Date(tickStartDate.getTime() + Math.random() * tickDurationMs)
+    );
+
+    // Log tick summary for debugging quality
+    const fallbackIndicator = 'More insights coming soon';
+    const fallbackCount = emails.filter((e) => e.body.includes(fallbackIndicator)).length;
+    const docConcepts = currentWorld.documents[0]?.context?.coreConcepts ?? [];
+    const conceptsUsed = new Set<string>();
+    for (const email of emails) {
+      for (const concept of docConcepts) {
+        if (email.body.toLowerCase().includes(concept.toLowerCase().slice(0, 12))) {
+          conceptsUsed.add(concept);
+        }
+      }
+    }
+
+    // Count unique senders to detect monologue issues
+    const uniqueSenders = new Set(emails.map((e) => e.from.characterId)).size;
+
+    console.log(
+      `[Tick ${currentWorld.tickCount}] ${emails.length} emails | ` +
+      `${fallbackCount} fallbacks | ` +
+      `${conceptsUsed.size}/${docConcepts.length} concepts | ` +
+      `${uniqueSenders} unique senders | ` +
+      `${threads.length} new threads`
     );
 
     // Update world state

@@ -791,29 +791,71 @@ IMPORTANT: Respond with valid JSON only. No markdown, no explanation, just the J
     prompt: string,
     context: GenerationContext
   ): string {
-    return `You are writing as a character with this voice profile:
+    // Determine formality description
+    let formalityDesc: string;
+    if (voice.formality < 0.3) {
+      formalityDesc = 'CASUAL - use contractions, informal language, relaxed tone';
+    } else if (voice.formality > 0.7) {
+      formalityDesc = 'FORMAL - proper grammar, professional tone, no slang';
+    } else {
+      formalityDesc = 'moderate formality';
+    }
 
-VOICE PROFILE:
-- Formality: ${voice.formality}/1 (0=very casual, 1=very formal)
-- Verbosity: ${voice.verbosity}/1 (0=terse, 1=verbose)
-- Characteristic vocabulary: ${voice.vocabulary.join(', ')}
-- Typical greetings: ${voice.greetingPatterns.join(', ')}
-- Typical sign-offs: ${voice.signoffPatterns.join(', ')}
-- Quirks: ${voice.quirks.join('; ')}
+    // Determine verbosity description
+    let verbosityDesc: string;
+    if (voice.verbosity < 0.3) {
+      verbosityDesc = 'BRIEF - 2-3 sentences max, get to the point';
+    } else if (voice.verbosity > 0.7) {
+      verbosityDesc = 'DETAILED - provide context, elaborate on points';
+    } else {
+      verbosityDesc = 'moderate length';
+    }
 
-EXAMPLE OUTPUTS FROM THIS CHARACTER:
-${voice.sampleOutputs.map((s, i) => `--- Example ${i + 1} ---\n${s}`).join('\n\n')}
+    // Build quirks requirement (if any)
+    const quirksSection = voice.quirks.length > 0
+      ? `\nMUST USE ONE OF THESE QUIRKS:\n${voice.quirks.map((q) => `• ${q}`).join('\n')}`
+      : '';
 
-${context.threadSubject ? `THREAD CONTEXT:\nSubject: ${context.threadSubject}` : ''}
-${context.previousMessages?.length ? `Previous messages:\n${context.previousMessages.join('\n---\n')}` : ''}
-${context.relationships ? `Relationship to recipients: ${context.relationships}` : ''}
-${context.emotionalState ? `Current emotional state: ${context.emotionalState}` : ''}
-${context.characterKnowledge?.length ? `What you know:\n- ${context.characterKnowledge.join('\n- ')}` : ''}
+    // Build vocabulary section (if any)
+    const vocabSection = voice.vocabulary.length > 0
+      ? `\n- USE these words/phrases: ${voice.vocabulary.slice(0, 5).join(', ')}`
+      : '';
 
+    return `WRITE AS THIS CHARACTER:
+
+═══════════════════════════════════════════════════════════════════════════════
+REQUIRED VOICE (MANDATORY)
+═══════════════════════════════════════════════════════════════════════════════
+- Greeting: "${voice.greetingPatterns[0] ?? 'Hi'}"
+- Sign-off: "${voice.signoffPatterns[0] ?? 'Best'}"
+- Formality: ${formalityDesc}
+- Length: ${verbosityDesc}${vocabSection}
+${quirksSection}
+
+${context.previousMessages?.length ? `═══════════════════════════════════════════════════════════════════════════════
+REPLYING TO:
+${context.previousMessages.slice(-2).join('\n---\n')}` : ''}
+
+${context.emotionalState ? `Current mood: ${context.emotionalState}` : ''}
+
+═══════════════════════════════════════════════════════════════════════════════
+FORBIDDEN PATTERNS (do NOT use these generic phrases)
+═══════════════════════════════════════════════════════════════════════════════
+• "we've been thinking"
+• "threading the needle"
+• "move the needle"
+• "circle back"
+• "synergy"
+• "leverage" (as a verb)
+• "going forward"
+• Generic corporate speak
+
+═══════════════════════════════════════════════════════════════════════════════
 YOUR TASK:
 ${prompt}
+═══════════════════════════════════════════════════════════════════════════════
 
-Write ONLY the email content. Match the voice profile exactly. Do not include headers or metadata.`;
+Write ONLY the email body. Match the voice EXACTLY. No headers or metadata.`;
   }
 
   private incrementCallCount(modelId: ModelIdentifier): void {
