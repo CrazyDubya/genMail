@@ -55,6 +55,7 @@ interface PlannedEvent {
   participants: CharacterId[];
   affectedTensions: TensionId[];
   shouldGenerateEmail: boolean;
+  existingThreadId?: ThreadId;  // If set, join this thread instead of creating new one
 }
 
 /**
@@ -76,8 +77,37 @@ async function planTickEvents(
   // Get available characters
   const characters = world.characters.filter((c) => c.archetype !== 'spammer');
 
-  // Plan tension-driven events
-  for (const tension of activeTensions.slice(0, 2)) {
+  // Build a map of tensions that already have active threads
+  // This prevents spawning multiple parallel conversations about the same tension
+  const tensionToExistingThread = new Map<TensionId, ThreadId>();
+  const tensionsWithActiveConversations = new Set<TensionId>();
+
+  for (const email of world.emails) {
+    // Find which tension this email's thread relates to
+    for (const tension of activeTensions) {
+      // Check if email subject matches tension description
+      const tensionKeywords = tension.description.toLowerCase().split(' ').filter((w) => w.length > 4);
+      const subjectLower = email.subject.toLowerCase();
+      const matchScore = tensionKeywords.filter((kw) => subjectLower.includes(kw)).length;
+
+      if (matchScore >= 2) {
+        // This thread is about this tension
+        if (!tensionToExistingThread.has(tension.id)) {
+          tensionToExistingThread.set(tension.id, email.threadId);
+        }
+        tensionsWithActiveConversations.add(tension.id);
+        break;
+      }
+    }
+  }
+
+  // Plan tension-driven events - but only for tensions WITHOUT active conversations
+  // This prevents "the same topic, different participants" problem
+  const tensionsNeedingNewConversation = activeTensions.filter(
+    (t) => !tensionsWithActiveConversations.has(t.id)
+  );
+
+  for (const tension of tensionsNeedingNewConversation.slice(0, 1)) {
     const participants = tension.participants
       .map((id) => world.characters.find((c) => c.id === id))
       .filter((c): c is Character => c !== undefined);
@@ -90,6 +120,39 @@ async function planTickEvents(
         affectedTensions: [tension.id],
         shouldGenerateEmail: true,
       });
+    }
+  }
+
+  // For tensions WITH active conversations, encourage replies instead of new threads
+  // Select a character who should respond (someone who was addressed but hasn't replied)
+  for (const tension of activeTensions.filter((t) => tensionsWithActiveConversations.has(t.id)).slice(0, 1)) {
+    const existingThreadId = tensionToExistingThread.get(tension.id);
+    if (!existingThreadId) continue;
+
+    const threadEmails = world.emails.filter((e) => e.threadId === existingThreadId);
+    if (threadEmails.length === 0) continue;
+
+    const lastEmail = threadEmails[threadEmails.length - 1];
+    // Find a recipient who hasn't replied yet
+    const waitingToReply = lastEmail.to.find((recipient) => {
+      const recipientEmails = threadEmails.filter((e) => e.from.characterId === recipient.characterId);
+      const lastRecipientEmail = recipientEmails[recipientEmails.length - 1];
+      // Check if recipient's last email is older than the last email in thread
+      return !lastRecipientEmail || lastRecipientEmail.sentAt < lastEmail.sentAt;
+    });
+
+    if (waitingToReply) {
+      const respondingCharacter = world.characters.find((c) => c.id === waitingToReply.characterId);
+      if (respondingCharacter) {
+        events.push({
+          type: 'communication',
+          description: `Responding to thread about: ${tension.description}`,
+          participants: [respondingCharacter.id, lastEmail.from.characterId],
+          affectedTensions: [tension.id],
+          shouldGenerateEmail: true,
+          existingThreadId: existingThreadId as ThreadId,  // Join existing thread
+        });
+      }
     }
   }
 
@@ -160,16 +223,30 @@ async function planTickEvents(
     }
   }
 
-  // Add newsletter if we have a curator
+  // Add newsletter if we have a curator - but limit frequency
   const curator = world.characters.find((c) => c.archetype === 'newsletter_curator');
-  if (curator && world.tickCount % 3 === 0) {
-    events.push({
-      type: 'external',
-      description: 'Newsletter publication',
-      participants: [curator.id],
-      affectedTensions: [],
-      shouldGenerateEmail: true,
-    });
+  if (curator) {
+    // Check when the last newsletter was sent
+    const newsletters = world.emails.filter((e) => e.type === 'newsletter');
+    const lastNewsletter = newsletters.length > 0
+      ? newsletters.reduce((latest, e) => e.sentAt > latest.sentAt ? e : latest)
+      : null;
+
+    // Only generate if at least 5 ticks have passed since the last newsletter
+    // This prevents newsletter spam while still allowing regular updates
+    const ticksSinceLastNewsletter = lastNewsletter
+      ? world.tickCount - (lastNewsletter.generatedBy?.tick ?? 0)
+      : 999;
+
+    if (ticksSinceLastNewsletter >= 5) {
+      events.push({
+        type: 'external',
+        description: 'Newsletter publication',
+        participants: [curator.id],
+        affectedTensions: [],
+        shouldGenerateEmail: true,
+      });
+    }
   }
 
   // Add spam occasionally
@@ -220,7 +297,43 @@ async function generateEmailsFromEvents(
     }
 
     // Check if this is part of an existing thread
-    const existingThread = findRelatedThread(event, world, sender, recipients);
+    // First check if the event explicitly specifies a thread to join
+    let existingThread: Thread | undefined;
+    if (event.existingThreadId) {
+      // First check if we already created this thread in this tick
+      existingThread = threads.find((t) => t.id === event.existingThreadId);
+
+      // Otherwise reconstruct from emails
+      if (!existingThread) {
+        const threadEmails = world.emails.filter((e) => e.threadId === event.existingThreadId);
+        if (threadEmails.length > 0) {
+          // Reconstruct minimal thread info
+          const firstEmail = threadEmails[0];
+          existingThread = {
+            id: event.existingThreadId,
+            subject: firstEmail.subject,
+            participants: [...new Set(threadEmails.flatMap((e) => [e.from.characterId, ...e.to.map((t) => t.characterId)]))],
+            emails: threadEmails.map((e) => e.id),
+            startedAt: firstEmail.sentAt,
+            lastActivityAt: threadEmails[threadEmails.length - 1].sentAt,
+            messageCount: threadEmails.length,
+            relatedTensions: event.affectedTensions,
+            originType: 'communication',
+            conversationState: {
+              pendingQuestions: [],
+              pointsByParticipant: {},
+              discussedTopics: [],
+            },
+          };
+        }
+      }
+    }
+
+    // If no explicit thread, try to find one naturally
+    if (!existingThread) {
+      existingThread = findRelatedThread(event, world, sender, recipients);
+    }
+
     let inReplyTo: EmailId | undefined;
     let thread: Thread;
 
@@ -1038,16 +1151,19 @@ ${threadAnalysis.suggestedDirection}
   if (pointsAlreadyMade.length > 0) {
     antiRepetitionSection = `
 ═══════════════════════════════════════════════════════════════════════════════
-⚠️ CRITICAL - YOUR PREVIOUS POINTS IN THIS THREAD (DO NOT REPEAT)
+🚫 FORBIDDEN - YOU ALREADY MADE THESE POINTS (DO NOT REPEAT ANY OF THEM)
 ═══════════════════════════════════════════════════════════════════════════════
-${pointsAlreadyMade.slice(0, 5).map((p) => `❌ "${p.slice(0, 100)}"`).join('\n')}
+${pointsAlreadyMade.slice(-5).map((p, i) => `${i + 1}. ❌ "${p.slice(0, 80)}..."`).join('\n')}
 
-You MUST take a DIFFERENT angle:
-• Respond to what others specifically said
-• Ask a new question you haven't asked
-• Bring up a different aspect of ${coreConcepts[0] ?? 'the document'}
-• Share a concrete example or implication
-• Challenge or build on someone else's point
+IF YOU REPEAT ANY POINT ABOVE, YOUR EMAIL IS INVALID.
+
+Instead, you MUST do one of these:
+• ANSWER a question someone asked you (see previous messages)
+• ASK a NEW question you haven't asked before
+• PROPOSE a concrete next step (meeting, decision, action)
+• SHARE a specific example or data point not yet mentioned
+• CHANGE YOUR POSITION based on what you've learned from others
+═══════════════════════════════════════════════════════════════════════════════
 `;
   }
 
@@ -1066,17 +1182,47 @@ Address at least one of these BEFORE making new arguments.
 
   // Build thread context with full messages
   let threadContext = '';
+  let responseToQuote = '';
+
   if (previousMessages.length > 0) {
+    // Extract a specific quote from the last message that MUST be responded to
+    const lastMessage = previousMessages[previousMessages.length - 1];
+    // Get the sender name from the message format "From: Name\n..."
+    const lastSenderMatch = lastMessage.match(/From:\s*([^\n]+)/);
+    const lastSender = lastSenderMatch ? lastSenderMatch[1].trim() : 'the previous sender';
+
+    // Extract meaningful sentences (questions or statements > 30 chars)
+    const messageBody = lastMessage.split('\n').slice(1).join(' '); // Skip "From:" line
+    const sentences = messageBody
+      .split(/[.!?]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 30 && !s.toLowerCase().startsWith('hi ') && !s.toLowerCase().startsWith('dear '));
+
+    // Prefer questions, otherwise pick a substantive statement
+    const questions = sentences.filter((s) => s.includes('?') || s.toLowerCase().includes('how') || s.toLowerCase().includes('what') || s.toLowerCase().includes('why'));
+    const quoteToAddress = questions[0] ?? sentences[Math.floor(Math.random() * Math.min(3, sentences.length))] ?? '';
+
+    if (quoteToAddress) {
+      responseToQuote = `
+═══════════════════════════════════════════════════════════════════════════════
+🎯 YOU MUST RESPOND TO THIS SPECIFIC POINT FROM ${lastSender}:
+═══════════════════════════════════════════════════════════════════════════════
+
+"${quoteToAddress.slice(0, 200)}"
+
+YOUR RESPONSE MUST:
+1. START by directly addressing this quote (agree, disagree, or answer the question)
+2. Use phrases like "You asked about...", "Regarding your point on...", "To answer your question..."
+3. THEN add your own perspective or follow-up
+═══════════════════════════════════════════════════════════════════════════════
+`;
+    }
+
     threadContext = `
 ═══════════════════════════════════════════════════════════════════════════════
-CONVERSATION SO FAR (read carefully and respond to actual content)
+CONVERSATION SO FAR
 ═══════════════════════════════════════════════════════════════════════════════
 ${previousMessages.join('\n---\n')}
-
-This is a REPLY. You MUST:
-1. Quote or paraphrase something specific from the last message
-2. Directly respond to that point (agree, disagree, ask for clarification)
-3. Then add ONE new insight, question, or proposal
 `;
   } else {
     threadContext = `
@@ -1094,7 +1240,7 @@ ${contextInfo}
 ${documentSection}
 YOUR KNOWLEDGE AND PERSPECTIVE:
 ${senderKnowledge ? `- ${senderKnowledge}` : 'General understanding of the topic'}
-${threadContext}${threadAnalysisSection}${antiRepetitionSection}${responseSection}
+${responseToQuote}${threadContext}${threadAnalysisSection}${antiRepetitionSection}${responseSection}
 ═══════════════════════════════════════════════════════════════════════════════
 WRITING REQUIREMENTS
 ═══════════════════════════════════════════════════════════════════════════════
