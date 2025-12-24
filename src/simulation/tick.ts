@@ -21,6 +21,7 @@ import type {
   ThreadId,
   Theme,
   DocumentContext,
+  ProcessedDocument,
 } from '../types.js';
 import type { ModelRouter } from '../models/router.js';
 
@@ -31,6 +32,66 @@ import type { ModelRouter } from '../models/router.js';
 interface TickOptions {
   targetEventsPerTick?: number;
   tickDurationHours?: number;
+}
+
+// =============================================================================
+// MULTI-DOCUMENT CONTEXT MERGING
+// =============================================================================
+
+/**
+ * Merge context from all documents in the universe.
+ *
+ * Previously we only used documents[0]?.context, ignoring all other documents.
+ * This function combines thesis, concepts, claims, and summaries from ALL docs.
+ */
+function getMergedDocumentContext(documents: ProcessedDocument[]): DocumentContext | undefined {
+  if (documents.length === 0) return undefined;
+  if (documents.length === 1) return documents[0].context;
+
+  // Merge thesis from all docs
+  const theses = documents.map(d => d.context?.thesis).filter(Boolean) as string[];
+  const mergedThesis = theses.length === 1
+    ? theses[0]
+    : theses.join(' Additionally, ');
+
+  // Combine core concepts from all docs (deduplicated)
+  const allConcepts = documents.flatMap(d => d.context?.coreConcepts ?? []);
+  const uniqueConcepts = [...new Set(allConcepts)];
+
+  // Combine claims from all docs
+  const allClaims = documents.flatMap(d => d.context?.claims ?? []);
+
+  // Combine argument structures from all docs
+  const allArguments = documents.flatMap(d => d.context?.argumentStructure ?? []);
+
+  // Combine summaries
+  const allSummaries = documents.map(d => d.context?.summary ?? '').filter(s => s.length > 0);
+  const mergedSummary = allSummaries.join('\n\n--- From another document ---\n\n');
+
+  // Combine significance
+  const allSignificance = documents.map(d => d.context?.significance ?? '').filter(s => s.length > 0);
+  const mergedSignificance = allSignificance.join(' Furthermore, ');
+
+  // Use first document as base for structure fields
+  const baseContext = documents[0].context;
+  if (!baseContext) return undefined;
+
+  return {
+    ...baseContext,
+    thesis: mergedThesis,
+    coreConcepts: uniqueConcepts,
+    claims: allClaims,
+    argumentStructure: allArguments,
+    summary: mergedSummary,
+    significance: mergedSignificance,
+  };
+}
+
+/**
+ * Get all rich concepts from all documents.
+ */
+function getAllDocumentConcepts(documents: ProcessedDocument[]) {
+  return documents.flatMap(d => d.concepts ?? []);
 }
 
 // =============================================================================
@@ -825,8 +886,8 @@ async function analyzeThread(
     return `[${senderChar?.name ?? e.from.displayName}]: ${e.body}`;
   }).join('\n\n');
 
-  // Get document context for grounding
-  const docContext = world.documents[0]?.context;
+  // Get document context for grounding (merged from all documents)
+  const docContext = getMergedDocumentContext(world.documents);
   const documentThesis = docContext?.thesis ?? '';
   const coreConcepts = docContext?.coreConcepts ?? [];
 
@@ -977,12 +1038,12 @@ async function generateEmail(
     Thread: ${thread.subject}`);
 
     // Pass document context to fallback for better quality
-    body = generateFallbackEmail(sender, event, world.documents[0]?.context);
+    body = generateFallbackEmail(sender, event, getMergedDocumentContext(world.documents));
     usedFallback = true;
   }
 
   // Validate document content was used (only for non-fallback, non-spam/newsletter)
-  const docContext = world.documents[0]?.context;
+  const docContext = getMergedDocumentContext(world.documents);
   if (!usedFallback && docContext?.coreConcepts?.length &&
       sender.archetype !== 'spammer' && sender.archetype !== 'newsletter_curator') {
     const emailLower = body.toLowerCase();
@@ -1054,13 +1115,14 @@ function buildEmailPrompt(
 ): string {
   const recipientNames = recipients.map((r) => r.name).join(', ');
 
-  // Get document context if available - use MUCH more context
-  const docContext = world.documents[0]?.context;
+  // Get document context if available - merged from ALL documents
+  const docContext = getMergedDocumentContext(world.documents);
   const documentThesis = docContext?.thesis ?? '';
   const documentSummary = docContext?.summary ?? '';
   const documentSignificance = docContext?.significance ?? '';
   const documentClaims = docContext?.claims ?? [];
   const coreConcepts = docContext?.coreConcepts ?? [];
+  const argumentStructure = docContext?.argumentStructure ?? [];
 
   // Include sender's full knowledge - don't truncate
   const senderKnowledge = sender.knows.join('\n- ');
@@ -1110,11 +1172,17 @@ ${documentSummary.slice(0, 1200)}
 KEY TOPICS:
 ${themes.map((t) => `- ${t.name}: ${t.description}`).join('\n')}
 
-KEY CONCEPTS (pick 2-3 to focus on deeply):
-${concepts.map((c) => `- ${c.name}: ${c.definition?.slice(0, 250) ?? 'Core concept'}`).join('\n')}
+KEY CONCEPTS AND THEIR CONNECTIONS (pick 2-3 to focus on deeply):
+${concepts.map((c) =>
+  `• ${c.name}: ${c.roleInDocument ?? c.definition?.slice(0, 150) ?? 'Key concept'}
+    ${c.relationships?.slice(0, 2).map(r => `  → ${r.relationshipType}: ${r.targetConcept}`).join('\n') || ''}`
+).join('\n')}
 
-KEY CLAIMS FROM THE DOCUMENT:
-${documentClaims.slice(0, 3).map((c) => `• ${c.statement}`).join('\n')}
+KEY CLAIMS WITH EVIDENCE (cite these for credibility):
+${documentClaims.slice(0, 3).map((c) =>
+  `• CLAIM: ${c.statement}
+   EVIDENCE: ${c.evidence?.slice(0, 2).join('; ') || 'From document analysis'}`
+).join('\n')}
 
 WHY THIS MATTERS:
 ${documentSignificance}
@@ -1142,9 +1210,18 @@ Include vague urgency and a call to action. Length: 50-100 words.`;
   // Build rich document context section - CRITICAL for grounding emails in document
   let documentSection = '';
   if (documentThesis) {
-    // Pick specific concepts to focus on (for variety between emails)
-    const focusConcepts = coreConcepts.slice(0, 4);
+    // Get rich concepts with relationships from all documents
+    const richConcepts = getAllDocumentConcepts(world.documents).slice(0, 5);
     const focusClaim = documentClaims[Math.floor(Math.random() * Math.min(3, documentClaims.length))];
+
+    // Build concept section with relationships if available
+    const conceptSection = richConcepts.length > 0
+      ? `KEY CONCEPTS AND CONNECTIONS:
+${richConcepts.map(c =>
+  `• ${c.name}: ${c.roleInDocument ?? c.definition?.slice(0, 80) ?? 'Key concept'}
+    ${c.relationships?.slice(0, 2).map(r => `  → ${r.relationshipType}: ${r.targetConcept}`).join('\n') || ''}`
+).join('\n')}`
+      : `KEY CONCEPTS: ${coreConcepts.slice(0, 4).join(', ')}`;
 
     documentSection = `
 ═══════════════════════════════════════════════════════════════════════════════
@@ -1153,21 +1230,27 @@ Include vague urgency and a call to action. Length: 50-100 words.`;
 
 THESIS: "${documentThesis}"
 
-PICK AT LEAST ONE TO REFERENCE IN YOUR EMAIL:
-${focusConcepts.map((c) => `• ${c}`).join('\n')}
-${focusClaim ? `• CLAIM: ${focusClaim.statement}` : ''}
+${conceptSection}
+
+${focusClaim ? `CLAIM TO DISCUSS: ${focusClaim.statement}
+EVIDENCE: ${focusClaim.evidence?.slice(0, 2).join('; ') || 'See document'}` : ''}
 
 WHY THIS MATTERS: ${documentSignificance?.slice(0, 200) ?? 'Important findings'}
 
 ═══════════════════════════════════════════════════════════════════════════════
 DOCUMENT SUMMARY (for context):
 ${documentSummary.slice(0, 800)}
+${argumentStructure.length > 0 ? `
+
+ARGUMENT FLOW (discussion should follow this logic):
+${argumentStructure.slice(0, 3).map((a, i) => `${i + 1}. ${a.point}`).join('\n')}` : ''}
 ═══════════════════════════════════════════════════════════════════════════════
 
 YOUR EMAIL MUST:
-1. Name-drop at least one concept from above
-2. Reference or react to the thesis
-3. NOT use generic phrases like "Q4 launch" or "Series B" unless in document
+1. Reference at least one concept from above (use its relationships for context)
+2. React to or engage with the thesis
+3. Follow the document's argument flow in your reasoning
+4. NOT use generic phrases like "Q4 launch" or "Series B" unless in document
 `;
   }
 
@@ -1349,28 +1432,35 @@ function generateArchetypeSpecificBody(
 
   // Extract document content for use in fallbacks
   const thesis = docContext?.thesis ?? '';
-  const concepts = docContext?.coreConcepts?.slice(0, 3) ?? [];
+  const concepts = docContext?.coreConcepts?.slice(0, 4) ?? [];
   const claims = docContext?.claims?.slice(0, 2) ?? [];
+  const significance = docContext?.significance ?? '';
 
   // Newsletter curator - use actual document content
   if (sender.archetype === 'newsletter_curator') {
     // If we have document context, use it for a substantive newsletter
     if (thesis || concepts.length > 0) {
-      const conceptList = concepts.length > 0
-        ? `Key topics this week: ${concepts.join(', ')}.`
-        : '';
-      const claimHighlight = claims.length > 0 && claims[0]?.statement
-        ? `\n\nNotable finding: ${claims[0].statement.slice(0, 200)}`
+      const conceptSection = concepts.length > 0
+        ? `\n\nKey concepts explored:\n${concepts.map(c => `• ${c}`).join('\n')}`
         : '';
 
-      return `This week's focus: ${thesis ? thesis.slice(0, 150) : 'recent developments'}.
+      const claimSection = claims.length > 0
+        ? `\n\nNotable findings:\n${claims.map(c => `• ${c.statement.slice(0, 150)}`).join('\n')}`
+        : '';
 
-${conceptList}${claimHighlight}
+      const significanceSection = significance
+        ? `\n\nWhy this matters: ${significance.slice(0, 200)}`
+        : '';
 
-More insights coming soon.${quirk}`;
+      return `This week's focus: ${thesis.slice(0, 200) || 'recent developments'}.
+${conceptSection}
+${claimSection}
+${significanceSection}
+
+More analysis in upcoming editions.${quirk}`;
     }
 
-    // Fallback without document context
+    // Fallback without document context - still try to be substantive
     const sections = [
       `This week has been eventful! Here's what's happening with ${topic}.`,
       `We've got some updates to share regarding ${topic}.`,
@@ -1378,7 +1468,7 @@ More insights coming soon.${quirk}`;
     ];
     return `${sections[Math.floor(Math.random() * sections.length)]}
 
-More details coming soon.${quirk}`;
+We're tracking several developments that could reshape how we think about this space. Stay tuned for deeper analysis.${quirk}`;
   }
 
   // Spammer - promotional, urgent
@@ -1644,7 +1734,7 @@ export async function runSimulation(
     // Log tick summary for debugging quality
     const fallbackIndicator = 'More insights coming soon';
     const fallbackCount = emails.filter((e) => e.body.includes(fallbackIndicator)).length;
-    const docConcepts = currentWorld.documents[0]?.context?.coreConcepts ?? [];
+    const docConcepts = getMergedDocumentContext(currentWorld.documents)?.coreConcepts ?? [];
     const conceptsUsed = new Set<string>();
     for (const email of emails) {
       for (const concept of docConcepts) {
