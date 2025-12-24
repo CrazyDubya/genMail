@@ -23,6 +23,7 @@ import type {
   ExtractedConcept,
   ConceptRelationship,
   DocumentChunk,
+  DocumentId,
   Author,
   AuthorRelationship,
   ExtractedFigure,
@@ -422,7 +423,7 @@ function chunkText(
       // Save current chunk
       chunks.push({
         id: uuid(),
-        documentId: docId as any,
+        documentId: docId as DocumentId,
         content: currentChunk.trim(),
         startOffset: currentStart,
         endOffset: currentOffset,
@@ -446,7 +447,7 @@ function chunkText(
   if (currentChunk.trim().length > 0) {
     chunks.push({
       id: uuid(),
-      documentId: docId as any,
+      documentId: docId as DocumentId,
       content: currentChunk.trim(),
       startOffset: currentStart,
       endOffset: currentOffset,

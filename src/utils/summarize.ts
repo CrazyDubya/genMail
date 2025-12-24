@@ -178,7 +178,7 @@ Write in third person, past tense. Be factual and brief.`;
       maxTokens,
     });
     return summary;
-  } catch (error) {
+  } catch {
     console.warn('[Summarize] Failed to generate summary, using fallback');
     return generateFallbackSummary(emails, characters);
   }
