@@ -182,23 +182,28 @@ The UI tells a story: you've recovered a data archive. Some emails are pristine.
 ## Architecture
 
 ```
-emailverse/
-├── packages/
-│   ├── core/          # Types, utilities (WorldState, Character, Email)
-│   ├── agents/        # Agent implementations + Model Router
-│   │   ├── director.ts
-│   │   ├── research/  # Gemini-powered extraction
-│   │   ├── character/ # Claude-powered psychology
-│   │   ├── content/   # Email generation
-│   │   └── models/    # Multi-model routing
-│   ├── simulation/    # World state, tick engine
-│   ├── queue/         # Task queue (local/Cloudflare)
-│   ├── storage/       # Storage (SQLite/D1)
-│   └── ui/            # Web Components
-├── apps/
-│   ├── local/         # Development server (Hono)
-│   └── cloudflare/    # Production deployment
-└── docs/
+genMail/
+├── src/
+│   ├── models/          # Multi-model routing (Claude, OpenAI, Gemini, Grok, OpenRouter)
+│   │   ├── router.ts    # Model router with character binding
+│   │   └── embeddings.ts # Vector embeddings for RAG
+│   ├── pipeline/        # Document processing pipeline
+│   │   ├── documents.ts # Document ingestion & chunking
+│   │   ├── characters.ts # Character generation with psychology
+│   │   ├── understanding.ts # Document analysis & entity extraction
+│   │   └── rag.ts       # RAG retrieval system
+│   ├── simulation/      # World simulation
+│   │   └── tick.ts      # Simulation tick engine
+│   ├── storage/         # Persistence
+│   │   └── sqlite.ts    # SQLite storage
+│   ├── utils/           # Utilities
+│   │   ├── summarize.ts # Thread summarization
+│   │   └── vector-math.ts # Vector operations
+│   ├── api/
+│   │   └── server.ts    # Hono REST API
+│   └── types.ts         # Core type definitions
+├── sample/              # Sample documents for testing
+└── docs/                # Additional documentation
 ```
 
 ### The Pipeline
@@ -244,7 +249,7 @@ emailverse/
 ### Prerequisites
 
 - Node.js 20+
-- pnpm 8+
+- npm (or pnpm/yarn)
 - API keys for: Anthropic, OpenAI, Google AI, xAI, OpenRouter
 
 ### Setup
@@ -253,18 +258,21 @@ emailverse/
 # Clone and install
 git clone https://github.com/CrazyDubya/genMail.git
 cd genMail
-pnpm install
+npm install
 
 # Configure environment
 cp .env.example .env
 # Edit .env with your API keys
 
-# Initialize database
-pnpm run db:init
-
 # Start development server
-pnpm run dev
+npx tsx src/server.ts
 ```
+
+### First Run
+
+1. **Test Model Connectivity**: The server will validate all configured models on startup
+2. **Upload a Document**: POST to `/api/universe/create` with a PDF, TXT, or MD file
+3. **Generate Emails**: The system processes documents → extracts entities → generates characters → simulates world → produces emails
 
 ### Environment Variables
 
@@ -286,40 +294,45 @@ DEFAULT_EMAIL_COUNT=50
 
 ## Development Phases
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            DEVELOPMENT ROADMAP                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  PHASE 1: Static Generation ◀── Current                                    │
-│  ═══════════════════════════════════════                                    │
-│  • Upload documents                    • 50-75 emails generated             │
-│  • Wait 1-5 minutes                    • 8-12 distinct characters           │
-│  • Explore email inbox                 • Coherent threads                   │
-│                                                                             │
-│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
-│                                                                             │
-│  PHASE 2: User Replies                                                      │
-│  ═════════════════════                                                      │
-│  • Reply to any email                  • Characters respond naturally       │
-│  • Conversations continue              • World state updates                │
-│                                                                             │
-│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
-│                                                                             │
-│  PHASE 3: Generate More                                                     │
-│  ══════════════════════                                                     │
-│  • "Continue Thread" button            • Tensions escalate/resolve          │
-│  • Story advances                      • No infinite loops                  │
-│                                                                             │
-│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
-│                                                                             │
-│  PHASE 4: Add Documents                                                     │
-│  ══════════════════════                                                     │
-│  • Upload more documents               • World expands organically          │
-│  • New characters emerge               • Existing characters react          │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+### Phase 1: Static Generation (Current - Backend Complete)
+
+**Backend (Done)**
+- [x] Multi-model router (Claude, OpenAI, Gemini, Grok, OpenRouter)
+- [x] Document processing (PDF, TXT, MD)
+- [x] Entity extraction and merging
+- [x] Deep character generation (goals, secrets, beliefs)
+- [x] Character-to-model binding
+- [x] World simulation with ticks
+- [x] Email generation with threading
+- [x] SQLite storage
+- [x] RAG pipeline with embeddings
+- [x] Thread summarization
+- [x] REST API
+
+**Frontend (Not Started)**
+- [ ] Web Components email client UI
+- [ ] Folder list, email list, email view
+- [ ] Thread visualization
+- [ ] "Recovered Archive" aesthetic
+- [ ] Generation progress indicator
+
+---
+
+### Phase 2: User Replies (Not Started)
+- [ ] Reply compose UI
+- [ ] Route replies to correct character
+- [ ] Generate character responses
+- [ ] Update world state from user interaction
+
+### Phase 3: Generate More (Not Started)
+- [ ] "Continue Thread" button
+- [ ] Thread extension planning
+- [ ] Tension escalation/resolution
+
+### Phase 4: Add Documents (Not Started)
+- [ ] Incremental document processing
+- [ ] Entity merging with existing world
+- [ ] Character knowledge updates
 
 ---
 
@@ -381,13 +394,15 @@ Estimated per universe (50-75 emails):
 
 | Phase | Model | Est. Cost |
 |-------|-------|-----------|
-| Analysis | Gemini Flash | ~$0.05 |
+| Analysis | Gemini Flash | ~$0.03 |
 | Characters | Claude Sonnet | ~$0.15 |
-| Voice Samples | Mixed | ~$0.08 |
-| Simulation | Claude Haiku | ~$0.08 |
-| Email Generation | Mixed | ~$0.20 |
-| Review | Claude Haiku | ~$0.04 |
-| **Total** | | **~$0.60** |
+| Voice Samples | Mixed | ~$0.05 |
+| Simulation | Claude Haiku | ~$0.06 |
+| Email Generation | Mixed (incl. free tier) | ~$0.10 |
+| Review | Claude Haiku | ~$0.03 |
+| **Total** | | **~$0.40** |
+
+*Note: Using OpenRouter free tier models (e.g., `meta-llama/llama-4-maverick:free`) significantly reduces costs. See `MODELS.md` for current model configuration.*
 
 ---
 

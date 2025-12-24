@@ -32,7 +32,7 @@ EmailVerse uses 5+ LLM providers strategically. Each model has strengths that ma
 
 ### GPT (OpenAI)
 
-**gpt-5.2-nano**
+**gpt-4o-mini**
 - **Role**: General character voices, reliable dialogue
 - **Strengths**: Consistent voice, good dialogue, reliable
 - **Use for**:
@@ -40,7 +40,8 @@ EmailVerse uses 5+ LLM providers strategically. Each model has strengths that ma
   - Thread message generation
   - General email content
 - **Cost tier**: Standard
-- **Temperature**: 0.7-0.8
+- **Temperature**: 1.0 (GPT-4.1 models only support temperature 1.0)
+- **Note**: Some newer OpenAI models (like gpt-4.1-nano) don't support configurable temperature
 
 ### Gemini (Google)
 
@@ -73,17 +74,19 @@ EmailVerse uses 5+ LLM providers strategically. Each model has strengths that ma
 **openrouter-cheap**
 - **Role**: High-volume, low-stakes content
 - **Strengths**: Cost efficiency, scale
-- **Recommended models**: 
+- **Recommended models**:
+  - `meta-llama/llama-4-maverick:free` (FREE - recommended for cost savings)
+  - `deepseek/deepseek-chat-v3.1` (extremely cheap: $0.0015/M input)
   - `mistralai/mistral-7b-instruct` (fast, cheap)
-  - `meta-llama/llama-3.1-8b-instruct` (good quality/cost)
-  - `google/gemma-2-9b-it` (reliable)
 - **Use for**:
   - Spam emails
   - Automated system messages
   - Bulk newsletter content
   - Bot characters
-- **Cost tier**: Economy
+- **Cost tier**: Economy / Free
 - **Temperature**: 0.7-0.9
+
+**Note**: The free tier model `meta-llama/llama-4-maverick:free` provides $0.00 cost with 256K-1M context window - ideal for high-volume generation.
 
 ---
 
@@ -95,27 +98,27 @@ function assignModelToCharacter(character: CharacterPsychology): ModelIdentifier
   if (character.secretCount > 2 || character.goalComplexity === 'high') {
     return 'claude-haiku';
   }
-  
+
   // Economy tier: low-stakes characters
   if (character.archetype === 'spammer' || character.archetype === 'bot') {
     return 'openrouter-cheap';
   }
-  
+
   // Creative tier: unconventional characters
-  if (character.traits.includes('chaotic') || 
+  if (character.traits.includes('chaotic') ||
       character.traits.includes('humorous') ||
       character.archetype === 'skeptic') {
     return 'grok-3-fast';
   }
-  
+
   // Technical tier: precision characters
   if (character.traits.includes('technical') ||
       character.traits.includes('analytical')) {
-    return 'gemini-3-flash';
+    return 'gemini-flash';
   }
-  
+
   // Default: reliable mid-tier
-  return 'gpt-5.2-nano';
+  return 'gpt-4o-mini';
 }
 ```
 
@@ -236,12 +239,14 @@ async function withRateLimit<T>(
 If a model is unavailable, fallback chain:
 
 ```
-claude-sonnet → claude-haiku → gpt-5.2-nano
-claude-haiku → gpt-5.2-nano → gemini-3-flash
-gpt-5.2-nano → gemini-3-flash → openrouter-cheap
-gemini-3-flash → gpt-5.2-nano → openrouter-cheap
-grok-3-fast → gpt-5.2-nano (accept voice change)
-openrouter-cheap → (rotate through cheap models)
+claude-sonnet → claude-haiku → gpt-4o-mini
+claude-haiku → gpt-4o-mini → gemini-flash
+gpt-4o-mini → gemini-flash → openrouter-cheap
+gemini-flash → gpt-4o-mini → openrouter-cheap
+grok-3-fast → gpt-4o-mini (accept voice change)
+openrouter-cheap → (rotate through cheap/free models)
 ```
 
 **Important**: Fallbacks for character-bound models break voice consistency. Log a warning and consider regenerating the character's prior emails if this happens.
+
+**Troubleshooting**: If you encounter API errors, check `docs/issues/2025-12-23-model-fixes.md` for common issues and fixes.
