@@ -35,9 +35,9 @@ If you're hardcoding limits, stop and redesign.
 
 1. **Claude (Sonnet/Opus)**: Strategic decisions, character psychology, coherence review, orchestration
 2. **Gemini Flash**: High-volume extraction, technical analysis, structured data
-3. **GPT-5.2 nano**: General character voices, dialogue, reliable mid-tier work
+3. **GPT-4o-mini**: General character voices, dialogue, reliable mid-tier work
 4. **Grok 3 Fast**: Creative/chaotic characters, unexpected takes, humor
-5. **OpenRouter cheap models**: Spam, automated content, high-volume low-stakes
+5. **OpenRouter cheap/free models**: Spam, automated content, high-volume low-stakes (includes free tier like `meta-llama/llama-4-maverick:free`)
 
 Characters are BOUND to models. Once a character is assigned to GPT, GPT writes ALL their emails. This prevents voice drift.
 
@@ -53,45 +53,46 @@ Characters are BOUND to models. Once a character is assigned to GPT, GPT writes 
 ### File Structure
 
 ```
-emailverse/
-├── packages/           # Shared libraries
-│   ├── core/          # Types, utilities
-│   ├── agents/        # Agent implementations
-│   ├── simulation/    # World state, ticks
-│   ├── queue/         # Task queue abstraction
-│   ├── storage/       # Storage abstraction
-│   └── ui/            # Web Components
-├── apps/
-│   ├── local/         # Local dev server (Hono)
-│   └── cloudflare/    # Workers deployment
-└── docs/              # Documentation
+genMail/
+├── src/
+│   ├── models/        # Multi-model router + embeddings
+│   ├── pipeline/      # Document processing, character gen, RAG
+│   ├── simulation/    # World state, tick engine
+│   ├── storage/       # SQLite storage
+│   ├── utils/         # Summarization, vector math
+│   ├── api/           # Hono REST API
+│   └── types.ts       # Core type definitions
+├── sample/            # Sample documents for testing
+└── docs/              # Additional documentation
 ```
 
-Use pnpm workspaces. Keep packages focused.
+Flat structure for simplicity. Cloudflare deployment will be added later.
 
 ## Build Order
 
-### Foundation First
-1. `packages/core` - Types for WorldState, Character, Email, Task
-2. `packages/agents/models` - Model router with all 5 providers
-3. `packages/queue` - Task queue (local implementation first)
-4. `packages/storage` - Storage (SQLite first)
+### Foundation (Done)
+1. ~~`src/types.ts` - Types for WorldState, Character, Email~~
+2. ~~`src/models/router.ts` - Model router with all 5 providers~~
+3. ~~`src/storage/sqlite.ts` - SQLite storage~~
 
-### Then the Pipeline
-5. Document ingestion + chunking (Gemini Flash for extraction)
-6. Entity merging + relationship inference (Claude)
-7. Character generation with deep psychology (Claude)
-8. Voice binding + sample generation (assigned models)
-9. Simulation tick logic
-10. Email generation (character-bound models)
+### Pipeline (Done)
+4. ~~Document ingestion + chunking (Gemini Flash for extraction)~~
+5. ~~Entity merging + relationship inference (Claude)~~
+6. ~~Character generation with deep psychology (Claude)~~
+7. ~~Voice binding + sample generation (assigned models)~~
+8. ~~Simulation tick logic~~
+9. ~~Email generation (character-bound models)~~
+10. ~~RAG pipeline with embeddings~~
+11. ~~Thread summarization~~
 
-### Then the Interface
-11. Web Components for email client
-12. API routes (Hono locally)
-13. Generation status/progress UI
-14. Integration testing
+### API (Done)
+12. ~~REST API routes (Hono)~~
 
-### Then Phases 2-4
+### Interface (Not Started)
+13. Web Components for email client
+14. Generation status/progress UI
+
+### Phases 2-4 (Not Started)
 15. Reply routing
 16. Thread extension
 17. Document addition
@@ -175,8 +176,9 @@ DEFAULT_EMAIL_COUNT=50
 
 1. Re-read `NORTH_STAR.md` for vision alignment
 2. Check `ARCHITECTURE_DECISIONS.md` for prior reasoning
-3. Look at `TYPES.ts` for data shape guidance
-4. Ask the user with specific options, not open questions
+3. Look at `src/types.ts` for data shape guidance
+4. Check `docs/issues/` for historical fixes and troubleshooting
+5. Ask the user with specific options, not open questions
 
 ## Red Flags to Avoid
 
@@ -198,11 +200,15 @@ DEFAULT_EMAIL_COUNT=50
 
 ## Definition of Done (v0.1)
 
-- [ ] Upload 1-3 documents (PDF, TXT, MD)
-- [ ] Generate 50-75 emails in under 5 minutes
-- [ ] 8-12 characters with distinct voices
-- [ ] Coherent threads (3-7 messages each)
+**Backend (Complete)**
+- [x] Upload 1-3 documents (PDF, TXT, MD)
+- [x] Generate 50-75 emails in under 5 minutes
+- [x] 8-12 characters with distinct voices
+- [x] Coherent threads (3-7 messages each)
+- [x] Runs locally with SQLite
+- [x] All model integrations functional
+- [x] No hardcoded limits that break at scale
+
+**Frontend (Remaining)**
 - [ ] Working email client UI with folders
-- [ ] Runs locally with SQLite
-- [ ] All model integrations functional
-- [ ] No hardcoded limits that break at scale
+- [ ] Generation status/progress UI
