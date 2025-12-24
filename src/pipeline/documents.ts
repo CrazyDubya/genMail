@@ -27,6 +27,7 @@ import {
   conceptsToEntities,
   extractThemesFromContext,
 } from './understanding.js';
+import type { EmbeddingClient } from '../models/embeddings.js';
 
 // =============================================================================
 // DOCUMENT CHUNKING
@@ -419,8 +420,59 @@ Respond with JSON:
 }
 
 // =============================================================================
+// CHUNK EMBEDDING
+// =============================================================================
+
+export interface EmbeddingOptions {
+  embeddingClient: EmbeddingClient;
+  batchSize?: number;
+}
+
+/**
+ * Enrich chunks with embeddings for semantic search.
+ * Cost: ~$0.002 per document (text-embedding-3-small @ $0.02/1M tokens).
+ */
+export async function enrichChunksWithEmbeddings(
+  chunks: DocumentChunk[],
+  options: EmbeddingOptions
+): Promise<DocumentChunk[]> {
+  const { embeddingClient, batchSize = 20 } = options;
+
+  if (chunks.length === 0) {
+    return chunks;
+  }
+
+  console.log(
+    `[Document Processing] Embedding ${chunks.length} chunks...`
+  );
+
+  // Extract text content from chunks
+  const texts = chunks.map((c) => c.content);
+
+  // Generate embeddings in batch
+  const result = await embeddingClient.embedBatch(texts, batchSize);
+
+  console.log(
+    `[Document Processing] Embedded ${result.embeddings.length} chunks (${result.totalTokens} tokens)`
+  );
+
+  // Enrich chunks with embeddings
+  return chunks.map((chunk, i) => ({
+    ...chunk,
+    embedding: result.embeddings[i].embedding,
+  }));
+}
+
+// =============================================================================
 // FULL PROCESSING PIPELINE (NEW: With Document Understanding)
 // =============================================================================
+
+export interface ProcessDocumentOptions {
+  /** Optional embedding client for semantic search capability */
+  embeddingClient?: EmbeddingClient;
+  /** Batch size for embedding generation */
+  embeddingBatchSize?: number;
+}
 
 /**
  * Process a raw document through the ENHANCED extraction pipeline.
@@ -428,9 +480,10 @@ Respond with JSON:
  * NEW FLOW:
  * 1. Analyze document → get thesis, structure, core concepts
  * 2. Chunk with context → larger chunks aware of document structure
- * 3. Extract concepts → extract WITH document context (not isolation)
- * 4. Synthesize → build concept hierarchy
- * 5. Convert to legacy formats for compatibility
+ * 3. Embed chunks (optional) → generate embeddings for RAG
+ * 4. Extract concepts → extract WITH document context (not isolation)
+ * 5. Synthesize → build concept hierarchy
+ * 6. Convert to legacy formats for compatibility
  *
  * This solves the "Attention is All You Need" problem where processing
  * chunks in isolation missed the document's core thesis and generated
@@ -438,7 +491,8 @@ Respond with JSON:
  */
 export async function processDocument(
   doc: RawDocument,
-  router: ModelRouter
+  router: ModelRouter,
+  options: ProcessDocumentOptions = {}
 ): Promise<ProcessedDocument> {
   const startTime = Date.now();
 
@@ -453,11 +507,20 @@ export async function processDocument(
 
   // Step 2: Context-aware chunking (larger chunks, section-aware)
   console.log('[Document Processing] Step 2: Chunking with context...');
-  const chunks = chunkDocumentWithContext(doc, context, {
+  let chunks = chunkDocumentWithContext(doc, context, {
     maxTokens: 2500, // Larger than before (was 1000)
     overlap: 200,
   });
   console.log(`[Document Processing] Created ${chunks.length} chunks`);
+
+  // Step 2.5: Embed chunks (optional, enables RAG)
+  if (options.embeddingClient) {
+    console.log('[Document Processing] Step 2.5: Embedding chunks for RAG...');
+    chunks = await enrichChunksWithEmbeddings(chunks, {
+      embeddingClient: options.embeddingClient,
+      batchSize: options.embeddingBatchSize ?? 20,
+    });
+  }
 
   // Step 3: Extract concepts WITH document context
   console.log('[Document Processing] Step 3: Extracting concepts with context...');
@@ -536,18 +599,36 @@ export async function processDocumentLegacy(
 }
 
 /**
- * Process multiple documents.
+ * Process multiple documents in parallel.
+ * Uses Promise.allSettled to handle partial failures gracefully.
  */
 export async function processDocuments(
   docs: RawDocument[],
-  router: ModelRouter
+  router: ModelRouter,
+  options: ProcessDocumentOptions = {}
 ): Promise<ProcessedDocument[]> {
-  const results: ProcessedDocument[] = [];
-
-  for (const doc of docs) {
-    const processed = await processDocument(doc, router);
-    results.push(processed);
+  if (docs.length === 0) {
+    return [];
   }
 
-  return results;
+  // Process all documents in parallel
+  const results = await Promise.allSettled(
+    docs.map((doc) => processDocument(doc, router, options))
+  );
+
+  // Collect successful results, log failures
+  const processed: ProcessedDocument[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result.status === 'fulfilled') {
+      processed.push(result.value);
+    } else {
+      console.error(
+        `[Documents] Failed to process document ${docs[i].filename}:`,
+        result.reason
+      );
+    }
+  }
+
+  return processed;
 }

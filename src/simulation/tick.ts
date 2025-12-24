@@ -45,6 +45,52 @@ interface ThreadAnalysis {
   emotionalTone: string;
 }
 
+// Thread analysis cache - keyed by thread ID, stores analysis result
+// This prevents redundant LLM calls when generating multiple emails in the same thread
+const threadAnalysisCache = new Map<
+  ThreadId,
+  { analysis: ThreadAnalysis; emailCount: number }
+>();
+
+/**
+ * Get cached thread analysis or generate new one.
+ * Cache is invalidated when the thread has new emails since last analysis.
+ */
+async function getCachedThreadAnalysis(
+  threadId: ThreadId,
+  threadEmails: Email[],
+  sender: Character,
+  world: WorldState,
+  router: ModelRouter
+): Promise<ThreadAnalysis | null> {
+  const cached = threadAnalysisCache.get(threadId);
+
+  // Use cache if email count hasn't changed (no new emails in thread)
+  if (cached && cached.emailCount === threadEmails.length) {
+    return cached.analysis;
+  }
+
+  // Generate fresh analysis
+  const analysis = await analyzeThread(threadEmails, sender, world, router);
+
+  // Cache the result if successful
+  if (analysis) {
+    threadAnalysisCache.set(threadId, {
+      analysis,
+      emailCount: threadEmails.length,
+    });
+  }
+
+  return analysis;
+}
+
+/**
+ * Clear the thread analysis cache (call between ticks or when starting fresh)
+ */
+export function clearThreadAnalysisCache(): void {
+  threadAnalysisCache.clear();
+}
+
 // =============================================================================
 // EVENT PLANNING
 // =============================================================================
@@ -856,10 +902,11 @@ async function generateEmail(
   const { pointsAlreadyMade } = buildSenderHistoryContext(sender.id, threadEmails);
   const unansweredPoints = findUnansweredPoints(sender.id, threadEmails);
 
-  // SEMANTIC THREAD ANALYSIS: Use LLM to understand conversation before generating
+  // SEMANTIC THREAD ANALYSIS: Use cached or generate new analysis
+  // This prevents redundant LLM calls for multiple emails in the same thread
   let threadAnalysis: ThreadAnalysis | null = null;
   if (threadEmails.length > 0 && sender.archetype !== 'spammer' && sender.archetype !== 'newsletter_curator') {
-    threadAnalysis = await analyzeThread(threadEmails, sender, world, router);
+    threadAnalysis = await getCachedThreadAnalysis(thread.id, threadEmails, sender, world, router);
 
     // Update thread's conversation state with the analysis
     if (threadAnalysis && thread.conversationState) {

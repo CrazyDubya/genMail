@@ -66,6 +66,23 @@ export interface Storage {
   saveFact(universeId: UniverseId, fact: Fact): Promise<void>;
   getFacts(universeId: UniverseId): Promise<Fact[]>;
 
+  // Embedding operations
+  saveEmbedding(
+    universeId: UniverseId,
+    chunkId: string,
+    embedding: number[],
+    model: string
+  ): Promise<void>;
+  saveEmbeddingsBatch(
+    universeId: UniverseId,
+    embeddings: Array<{ chunkId: string; embedding: number[]; model: string }>
+  ): Promise<void>;
+  getEmbedding(chunkId: string): Promise<{ embedding: number[]; model: string } | null>;
+  getEmbeddingsByUniverse(universeId: UniverseId): Promise<
+    Array<{ chunkId: string; embedding: number[]; model: string }>
+  >;
+  deleteEmbeddingsByUniverse(universeId: UniverseId): Promise<void>;
+
   // Status
   getUniverseStatus(id: UniverseId): Promise<{
     phase: string;
@@ -290,6 +307,18 @@ export class SQLiteStorage implements Storage {
         FOREIGN KEY (universe_id) REFERENCES universes(id) ON DELETE CASCADE
       );
 
+      -- Embeddings table for RAG/semantic search
+      CREATE TABLE IF NOT EXISTS embeddings (
+        id TEXT PRIMARY KEY,
+        chunk_id TEXT NOT NULL UNIQUE,
+        universe_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        dimensions INTEGER NOT NULL,
+        embedding BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (universe_id) REFERENCES universes(id) ON DELETE CASCADE
+      );
+
       -- Indexes
       CREATE INDEX IF NOT EXISTS idx_documents_universe ON documents(universe_id);
       CREATE INDEX IF NOT EXISTS idx_characters_universe ON characters(universe_id);
@@ -302,6 +331,8 @@ export class SQLiteStorage implements Storage {
       CREATE INDEX IF NOT EXISTS idx_facts_universe ON facts(universe_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
       CREATE INDEX IF NOT EXISTS idx_user_universes_session ON user_universes(session_id);
+      CREATE INDEX IF NOT EXISTS idx_embeddings_universe ON embeddings(universe_id);
+      CREATE INDEX IF NOT EXISTS idx_embeddings_chunk ON embeddings(chunk_id);
     `);
   }
 
@@ -620,6 +651,116 @@ export class SQLiteStorage implements Storage {
       .all(universeId) as Array<{ data: string }>;
 
     return rows.map((row) => JSON.parse(row.data));
+  }
+
+  // Embedding operations
+
+  /**
+   * Convert number[] to Buffer for SQLite BLOB storage.
+   * Uses Float32Array for compact storage (~6KB per 1536-dim embedding).
+   */
+  private embeddingToBuffer(embedding: number[]): Buffer {
+    const float32Array = new Float32Array(embedding);
+    return Buffer.from(float32Array.buffer);
+  }
+
+  /**
+   * Convert Buffer back to number[].
+   */
+  private bufferToEmbedding(buffer: Buffer): number[] {
+    const float32Array = new Float32Array(
+      buffer.buffer,
+      buffer.byteOffset,
+      buffer.byteLength / Float32Array.BYTES_PER_ELEMENT
+    );
+    return Array.from(float32Array);
+  }
+
+  async saveEmbedding(
+    universeId: UniverseId,
+    chunkId: string,
+    embedding: number[],
+    model: string
+  ): Promise<void> {
+    const id = uuid();
+    const now = new Date().toISOString();
+    const embeddingBuffer = this.embeddingToBuffer(embedding);
+
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO embeddings
+         (id, chunk_id, universe_id, model, dimensions, embedding, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, chunkId, universeId, model, embedding.length, embeddingBuffer, now);
+  }
+
+  async saveEmbeddingsBatch(
+    universeId: UniverseId,
+    embeddings: Array<{ chunkId: string; embedding: number[]; model: string }>
+  ): Promise<void> {
+    const now = new Date().toISOString();
+
+    const insertStmt = this.db.prepare(
+      `INSERT OR REPLACE INTO embeddings
+       (id, chunk_id, universe_id, model, dimensions, embedding, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+
+    const insertMany = this.db.transaction(
+      (items: Array<{ chunkId: string; embedding: number[]; model: string }>) => {
+        for (const item of items) {
+          const id = uuid();
+          const embeddingBuffer = this.embeddingToBuffer(item.embedding);
+          insertStmt.run(
+            id,
+            item.chunkId,
+            universeId,
+            item.model,
+            item.embedding.length,
+            embeddingBuffer,
+            now
+          );
+        }
+      }
+    );
+
+    insertMany(embeddings);
+  }
+
+  async getEmbedding(
+    chunkId: string
+  ): Promise<{ embedding: number[]; model: string } | null> {
+    const row = this.db
+      .prepare('SELECT embedding, model FROM embeddings WHERE chunk_id = ?')
+      .get(chunkId) as { embedding: Buffer; model: string } | undefined;
+
+    if (!row) return null;
+
+    return {
+      embedding: this.bufferToEmbedding(row.embedding),
+      model: row.model,
+    };
+  }
+
+  async getEmbeddingsByUniverse(
+    universeId: UniverseId
+  ): Promise<Array<{ chunkId: string; embedding: number[]; model: string }>> {
+    const rows = this.db
+      .prepare('SELECT chunk_id, embedding, model FROM embeddings WHERE universe_id = ?')
+      .all(universeId) as Array<{ chunk_id: string; embedding: Buffer; model: string }>;
+
+    return rows.map((row) => ({
+      chunkId: row.chunk_id,
+      embedding: this.bufferToEmbedding(row.embedding),
+      model: row.model,
+    }));
+  }
+
+  async deleteEmbeddingsByUniverse(universeId: UniverseId): Promise<void> {
+    this.db
+      .prepare('DELETE FROM embeddings WHERE universe_id = ?')
+      .run(universeId);
   }
 
   // Status operations
