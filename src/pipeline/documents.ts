@@ -26,6 +26,9 @@ import {
   synthesizeConcepts,
   conceptsToEntities,
   extractThemesFromContext,
+  extractAuthors,
+  extractFiguresAndTables,
+  detectDocumentTensions,
 } from './understanding.js';
 import type { EmbeddingClient } from '../models/embeddings.js';
 
@@ -532,7 +535,45 @@ export async function processDocument(
   const { concepts } = await synthesizeConcepts(rawConcepts, context, router);
   console.log(`[Document Processing] ${concepts.length} concepts after synthesis`);
 
-  // Step 5: Convert to legacy formats for compatibility
+  // Step 5: Extract authors and relationships (for academic papers)
+  if (context.documentType === 'academic_paper' || context.documentType === 'technical_doc') {
+    console.log('[Document Processing] Step 5: Extracting authors...');
+    const { authors, authorRelationships } = await extractAuthors(doc, router);
+    if (authors.length > 0) {
+      context.authors = authors;
+      context.authorRelationships = authorRelationships;
+      console.log(`[Document Processing] Found ${authors.length} authors, ${authorRelationships.length} relationships`);
+    }
+  }
+
+  // Step 6: Extract figures and tables
+  console.log('[Document Processing] Step 6: Extracting figures and tables...');
+  const figures = await extractFiguresAndTables(chunks, context, router);
+  if (figures.length > 0) {
+    context.figures = figures;
+    console.log(`[Document Processing] Extracted ${figures.length} figures/tables`);
+
+    // Merge quantitative claims from figures into context claims
+    for (const figure of figures) {
+      for (const claim of figure.quantitativeClaims) {
+        context.claims.push({
+          statement: claim.statement,
+          evidence: [`From ${figure.reference}: ${claim.source}`],
+          confidence: 0.9,
+        });
+      }
+    }
+  }
+
+  // Step 7: Detect document tensions
+  console.log('[Document Processing] Step 7: Detecting document tensions...');
+  const documentTensions = await detectDocumentTensions(context, chunks, router);
+  if (documentTensions.length > 0) {
+    context.documentTensions = documentTensions;
+    console.log(`[Document Processing] Detected ${documentTensions.length} tensions`);
+  }
+
+  // Step 8: Convert to legacy formats for compatibility
   const entities = conceptsToEntities(concepts);
   const themes = extractThemesFromContext(context, concepts);
 

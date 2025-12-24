@@ -20,6 +20,8 @@ import type {
   ModelIdentifier,
   DocumentContext,
   ExtractedConcept,
+  Author,
+  AuthorRelationship,
 } from '../types.js';
 import type { ModelRouter } from '../models/router.js';
 import { generateCharacterKnowledge } from './understanding.js';
@@ -619,6 +621,288 @@ Write ONLY the email body, no subject or headers.`;
   return samples;
 }
 
+// =============================================================================
+// AUTHOR-BASED CHARACTER GENERATION
+// =============================================================================
+
+/**
+ * Generate characters from extracted document authors.
+ * Uses author contributions and positions to assign appropriate archetypes.
+ *
+ * This is particularly useful for academic papers where authors have
+ * documented contributions that map well to character roles.
+ */
+export async function generateCharactersFromAuthors(
+  authors: Author[],
+  authorRelationships: AuthorRelationship[],
+  themes: Theme[],
+  router: ModelRouter,
+  context?: DocumentContext,
+  concepts?: ExtractedConcept[]
+): Promise<Character[]> {
+  if (authors.length === 0) {
+    return [];
+  }
+
+  console.log(`[Character Generation] Generating characters from ${authors.length} authors`);
+
+  const characters: Character[] = [];
+
+  // Generate characters for each author in parallel
+  const results = await Promise.allSettled(
+    authors.map((author) =>
+      generateCharacterFromAuthor(author, themes, router, context, concepts)
+    )
+  );
+
+  // Collect successful characters
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result.status === 'fulfilled') {
+      characters.push(result.value);
+    } else {
+      console.warn(
+        `[Character Generation] Failed to generate character for author ${authors[i].name}:`,
+        result.reason
+      );
+    }
+  }
+
+  // Store author relationships for later use in tension initialization
+  // (relationships are used to inform initial character dynamics)
+  for (const char of characters) {
+    const author = authors.find((a) => a.name === char.name);
+    if (author) {
+      // Find relationships involving this author
+      const relatedRelationships = authorRelationships.filter(
+        (r) => r.author1Id === author.id || r.author2Id === author.id
+      );
+
+      // Add relationship info to character's suspects (loose coupling)
+      for (const rel of relatedRelationships) {
+        const otherAuthorId =
+          rel.author1Id === author.id ? rel.author2Id : rel.author1Id;
+        const otherAuthor = authors.find((a) => a.id === otherAuthorId);
+        if (otherAuthor) {
+          char.suspects.push(
+            `${rel.relationshipType} with ${otherAuthor.name}: ${rel.description}`
+          );
+        }
+      }
+    }
+  }
+
+  console.log(
+    `[Character Generation] Created ${characters.length} author-based characters`
+  );
+
+  return characters;
+}
+
+/**
+ * Generate a single character from an author.
+ */
+async function generateCharacterFromAuthor(
+  author: Author,
+  themes: Theme[],
+  router: ModelRouter,
+  context?: DocumentContext,
+  concepts?: ExtractedConcept[]
+): Promise<Character> {
+  const id = uuid() as CharacterId;
+  const archetype = author.suggestedArchetype || inferArchetypeFromAuthor(author);
+  const template = ARCHETYPE_TEMPLATES[archetype];
+
+  // Build a rich prompt using author's contribution
+  const prompt = `Create a character profile for a document author:
+
+Name: ${author.name}
+${author.affiliation ? `Affiliation: ${author.affiliation}` : ''}
+${author.contribution ? `Contribution: "${author.contribution}"` : ''}
+Author Position: ${author.authorPosition} of ${author.isCorresponding ? '(corresponding author)' : ''}
+${author.equalContribution ? 'Equal contribution noted' : ''}
+
+Archetype: ${archetype} - ${template.description}
+
+Related themes:
+${themes.slice(0, 3).map((t) => `- ${t.name}: ${t.description}`).join('\n')}
+
+Generate specific goals, secrets, and beliefs based on their documented contribution.
+
+Respond with JSON:
+{
+  "role": "string (based on their contribution)",
+  "goals": [{"description": "string", "priority": "immediate|short-term|long-term"}],
+  "secrets": [{"description": "string"}],
+  "beliefs": [{"statement": "string", "strength": 0.0-1.0}],
+  "voiceProfile": {
+    "formality": 0.0-1.0,
+    "verbosity": 0.0-1.0,
+    "vocabulary": ["technical terms they would use"],
+    "quirks": ["speech patterns based on their contribution"]
+  }
+}`;
+
+  try {
+    const result = await router.generateStructured<{
+      role: string;
+      goals: Array<{ description: string; priority: 'immediate' | 'short-term' | 'long-term' }>;
+      secrets: Array<{ description: string }>;
+      beliefs: Array<{ statement: string; strength: number }>;
+      voiceProfile: Partial<VoiceProfile>;
+    }>('claude-sonnet', prompt, { temperature: 0.7 });
+
+    const voiceProfile: VoiceProfile = {
+      formality: result.voiceProfile.formality ?? template.voiceHints.formality ?? 0.6,
+      verbosity: result.voiceProfile.verbosity ?? template.voiceHints.verbosity ?? 0.5,
+      emojiUsage: template.voiceHints.emojiUsage ?? 0.1,
+      punctuationStyle: 'standard',
+      vocabulary: result.voiceProfile.vocabulary ?? [],
+      greetingPatterns: template.voiceHints.greetingPatterns ?? ['Hi', 'Hello'],
+      signoffPatterns: template.voiceHints.signoffPatterns ?? ['Best', 'Regards'],
+      quirks: result.voiceProfile.quirks ?? template.voiceHints.quirks ?? [],
+      sampleOutputs: [],
+    };
+
+    // Generate voice samples
+    const samples = await generateVoiceSamples(voiceProfile, router, template.suggestedModel);
+    voiceProfile.sampleOutputs = samples;
+
+    const character: Character = {
+      id,
+      name: author.name,
+      email: generateAuthorEmail(author),
+      role: result.role,
+      origin: 'intrinsic',
+      archetype,
+      sourceEntityId: author.id,
+      voiceBinding: {
+        modelId: template.suggestedModel,
+        voiceProfile,
+      },
+      goals: result.goals.map((g) => ({
+        id: uuid(),
+        description: g.description,
+        priority: g.priority,
+      })),
+      secrets: result.secrets.map((s) => ({
+        id: uuid(),
+        description: s.description,
+        knownBy: [],
+      })),
+      beliefs: result.beliefs.map((b) => ({
+        id: uuid(),
+        statement: b.statement,
+        strength: b.strength,
+      })),
+      emotionalState: {
+        baseline: template.emotionalBaseline,
+        current: {
+          valence: 0,
+          arousal: 0.5,
+          dominantEmotion: 'neutral',
+        },
+      },
+      emailBehavior: template.emailBehavior,
+      knows:
+        context && concepts
+          ? generateCharacterKnowledge(archetype, context, concepts)
+          : [],
+      suspects: [],
+    };
+
+    // Bind to model
+    router.bindCharacter(id, character.voiceBinding.modelId, voiceProfile);
+
+    console.log(
+      `[Character Generation] Created author character "${character.name}" (${archetype}) with ${character.knows.length} knowledge items`
+    );
+
+    return character;
+  } catch (error) {
+    console.error(`Author character generation failed for ${author.name}:`, error);
+    // Return basic character on failure
+    const basicChar = createBasicCharacter(author.name, archetype, context, concepts);
+    router.bindCharacter(
+      basicChar.id,
+      basicChar.voiceBinding.modelId,
+      basicChar.voiceBinding.voiceProfile
+    );
+    return basicChar;
+  }
+}
+
+/**
+ * Infer archetype from author position and contribution.
+ */
+function inferArchetypeFromAuthor(author: Author): CharacterArchetype {
+  const contribution = (author.contribution || '').toLowerCase();
+
+  // First author or "led" → protagonist
+  if (author.authorPosition === 1 || contribution.includes('led') || contribution.includes('started')) {
+    return 'protagonist';
+  }
+
+  // Last author (often senior/mentor) → expert
+  if (author.authorPosition >= 5 || contribution.includes('supervised') || contribution.includes('advised')) {
+    return 'expert';
+  }
+
+  // Design/architecture → expert
+  if (contribution.includes('designed') || contribution.includes('proposed') || contribution.includes('conceived')) {
+    return 'expert';
+  }
+
+  // Implementation → insider (knows the codebase)
+  if (contribution.includes('implemented') || contribution.includes('codebase') || contribution.includes('engineering')) {
+    return 'insider';
+  }
+
+  // Experiments/tuning → enthusiast
+  if (contribution.includes('experiments') || contribution.includes('tuned') || contribution.includes('variants')) {
+    return 'enthusiast';
+  }
+
+  // Default for junior authors
+  if (author.authorPosition <= 2) {
+    return 'newcomer';
+  }
+
+  return 'expert'; // Default
+}
+
+/**
+ * Generate email address from author information.
+ */
+function generateAuthorEmail(author: Author): string {
+  const nameParts = author.name.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/);
+
+  // Try first.last format
+  const first = nameParts[0] || 'author';
+  const last = nameParts[nameParts.length - 1] || 'unknown';
+
+  // Infer domain from affiliation
+  let domain = 'research.org';
+  if (author.affiliation) {
+    const aff = author.affiliation.toLowerCase();
+    if (aff.includes('google')) domain = 'google.com';
+    else if (aff.includes('brain')) domain = 'google.com';
+    else if (aff.includes('openai')) domain = 'openai.com';
+    else if (aff.includes('meta') || aff.includes('facebook')) domain = 'meta.com';
+    else if (aff.includes('microsoft')) domain = 'microsoft.com';
+    else if (aff.includes('university')) {
+      const uniMatch = aff.match(/university of (\w+)/);
+      if (uniMatch) domain = `${uniMatch[1]}.edu`;
+      else domain = 'university.edu';
+    }
+    else if (aff.includes('mit')) domain = 'mit.edu';
+    else if (aff.includes('stanford')) domain = 'stanford.edu';
+    else if (aff.includes('berkeley')) domain = 'berkeley.edu';
+  }
+
+  return `${first}.${last}@${domain}`;
+}
+
 /**
  * Create a basic character as fallback.
  *
@@ -700,33 +984,54 @@ export async function generateCharacters(
     console.log(`[Character Generation] Document context available: "${context.thesis.slice(0, 50)}..."`);
   }
 
-  // Generate intrinsic characters from person entities (in parallel)
-  const personEntities = entities
-    .filter((e) => e.type === 'person')
-    .sort((a, b) => b.confidence - a.confidence)
-    .slice(0, Math.ceil(config.max / 2));
-
-  const intrinsicResults = await Promise.allSettled(
-    personEntities.map((entity) =>
-      generateIntrinsicCharacter(entity, themes, router, context, concepts)
-    )
-  );
-
-  // Collect successful intrinsic characters
   const characters: Character[] = [];
-  for (let i = 0; i < intrinsicResults.length; i++) {
-    const result = intrinsicResults[i];
-    if (result.status === 'fulfilled') {
-      characters.push(result.value);
-    } else {
-      console.warn(`[Character Generation] Failed to generate intrinsic character for ${personEntities[i].name}:`, result.reason);
+
+  // Priority 1: Generate characters from document authors (if available)
+  // This takes precedence for academic papers with documented contributions
+  if (context?.authors && context.authors.length > 0) {
+    console.log(`[Character Generation] Prioritizing ${context.authors.length} authors for character generation`);
+    const authorCharacters = await generateCharactersFromAuthors(
+      context.authors,
+      context.authorRelationships ?? [],
+      themes,
+      router,
+      context,
+      concepts
+    );
+    characters.push(...authorCharacters.slice(0, Math.floor(config.max / 2)));
+  }
+
+  // Priority 2: Generate intrinsic characters from person entities (in parallel)
+  // Skip if we already have enough from authors
+  const remainingForIntrinsic = Math.floor(config.max / 2) - characters.length;
+  if (remainingForIntrinsic > 0) {
+    const personEntities = entities
+      .filter((e) => e.type === 'person')
+      // Exclude entities that match author names (avoid duplicates)
+      .filter((e) => !characters.some((c) => c.name.toLowerCase() === e.name.toLowerCase()))
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, remainingForIntrinsic);
+
+    const intrinsicResults = await Promise.allSettled(
+      personEntities.map((entity) =>
+        generateIntrinsicCharacter(entity, themes, router, context, concepts)
+      )
+    );
+
+    for (let i = 0; i < intrinsicResults.length; i++) {
+      const result = intrinsicResults[i];
+      if (result.status === 'fulfilled') {
+        characters.push(result.value);
+      } else {
+        console.warn(`[Character Generation] Failed to generate intrinsic character for ${personEntities[i].name}:`, result.reason);
+      }
     }
   }
 
   // Generate extrinsic characters from archetypes (in parallel)
   const targetCount = Math.max(
     config.min,
-    Math.min(config.max, personEntities.length + config.archetypes.length)
+    Math.min(config.max, characters.length + config.archetypes.length)
   );
   const neededExtrinsic = Math.max(0, targetCount - characters.length);
 
