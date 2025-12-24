@@ -680,6 +680,7 @@ function createBasicCharacter(
 
 /**
  * Generate all characters for a universe.
+ * Uses parallel processing for faster generation while handling partial failures gracefully.
  *
  * NEW: Now accepts DocumentContext and concepts to populate character knowledge.
  */
@@ -691,25 +692,35 @@ export async function generateCharacters(
   context?: DocumentContext,
   concepts?: ExtractedConcept[]
 ): Promise<Character[]> {
-  const characters: Character[] = [];
-
   console.log(`[Character Generation] Starting with ${entities.length} entities, ${themes.length} themes`);
   if (context) {
     console.log(`[Character Generation] Document context available: "${context.thesis.slice(0, 50)}..."`);
   }
 
-  // Generate intrinsic characters from person entities
+  // Generate intrinsic characters from person entities (in parallel)
   const personEntities = entities
     .filter((e) => e.type === 'person')
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, Math.ceil(config.max / 2));
 
-  for (const entity of personEntities) {
-    const character = await generateIntrinsicCharacter(entity, themes, router, context, concepts);
-    characters.push(character);
+  const intrinsicResults = await Promise.allSettled(
+    personEntities.map((entity) =>
+      generateIntrinsicCharacter(entity, themes, router, context, concepts)
+    )
+  );
+
+  // Collect successful intrinsic characters
+  const characters: Character[] = [];
+  for (let i = 0; i < intrinsicResults.length; i++) {
+    const result = intrinsicResults[i];
+    if (result.status === 'fulfilled') {
+      characters.push(result.value);
+    } else {
+      console.warn(`[Character Generation] Failed to generate intrinsic character for ${personEntities[i].name}:`, result.reason);
+    }
   }
 
-  // Generate extrinsic characters from archetypes
+  // Generate extrinsic characters from archetypes (in parallel)
   const targetCount = Math.max(
     config.min,
     Math.min(config.max, personEntities.length + config.archetypes.length)
@@ -725,9 +736,20 @@ export async function generateCharacters(
     'enthusiast',
   ].slice(0, neededExtrinsic) as CharacterArchetype[];
 
-  for (const archetype of archetypesToUse) {
-    const character = await generateExtrinsicCharacter(archetype, themes, router, context, concepts);
-    characters.push(character);
+  const extrinsicResults = await Promise.allSettled(
+    archetypesToUse.map((archetype) =>
+      generateExtrinsicCharacter(archetype, themes, router, context, concepts)
+    )
+  );
+
+  // Collect successful extrinsic characters
+  for (let i = 0; i < extrinsicResults.length; i++) {
+    const result = extrinsicResults[i];
+    if (result.status === 'fulfilled') {
+      characters.push(result.value);
+    } else {
+      console.warn(`[Character Generation] Failed to generate extrinsic character for archetype ${archetypesToUse[i]}:`, result.reason);
+    }
   }
 
   const totalKnowledge = characters.reduce((sum, c) => sum + c.knows.length, 0);

@@ -92,6 +92,8 @@ export interface DocumentChunk {
   sectionTitle?: string;
   /** Index within the document for ordering */
   chunkIndex: number;
+  /** Optional embedding vector for semantic search (set during processing if embeddings enabled) */
+  embedding?: number[];
 }
 
 // ============================================================================

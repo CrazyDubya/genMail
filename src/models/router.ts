@@ -461,6 +461,8 @@ export class ModelRouter {
     callCount: 0,
     byModel: {} as Record<ModelIdentifier, UsageStats & { callCount: number }>,
   };
+  // Cache for character voice system prompts - avoids rebuilding voice instructions on every call
+  private characterSystemPrompts: Map<CharacterId, string> = new Map();
 
   constructor(config: ModelConfig) {
     // Initialize all clients
@@ -658,6 +660,7 @@ export class ModelRouter {
 
   /**
    * Generate content as a specific character.
+   * Uses cached system prompts for voice instructions to reduce token usage.
    */
   async generateAsCharacter(
     characterId: CharacterId,
@@ -669,10 +672,19 @@ export class ModelRouter {
       throw new Error(`No voice binding for character: ${characterId}`);
     }
 
-    const fullPrompt = this.buildCharacterPrompt(binding.voiceProfile, prompt, context);
+    // Get or build cached system prompt for voice instructions
+    let systemPrompt = this.characterSystemPrompts.get(characterId);
+    if (!systemPrompt) {
+      systemPrompt = this.buildVoiceSystemPrompt(binding.voiceProfile);
+      this.characterSystemPrompts.set(characterId, systemPrompt);
+    }
 
-    return this.generate(binding.modelId, fullPrompt, {
+    // Build the user prompt with just the task-specific content
+    const userPrompt = this.buildCharacterUserPrompt(prompt, context);
+
+    return this.generate(binding.modelId, userPrompt, {
       temperature: 0.75,
+      systemPrompt,
     });
   }
 
@@ -786,11 +798,11 @@ IMPORTANT: Respond with valid JSON only. No markdown, no explanation, just the J
   // PRIVATE METHODS
   // ===========================================================================
 
-  private buildCharacterPrompt(
-    voice: VoiceProfile,
-    prompt: string,
-    context: GenerationContext
-  ): string {
+  /**
+   * Build the system prompt for a character's voice (cached per character).
+   * Contains voice instructions that don't change between emails.
+   */
+  private buildVoiceSystemPrompt(voice: VoiceProfile): string {
     // Determine formality description
     let formalityDesc: string;
     if (voice.formality < 0.3) {
@@ -821,7 +833,7 @@ IMPORTANT: Respond with valid JSON only. No markdown, no explanation, just the J
       ? `\n- USE these words/phrases: ${voice.vocabulary.slice(0, 5).join(', ')}`
       : '';
 
-    return `WRITE AS THIS CHARACTER:
+    return `You are writing emails as a specific character. Follow these voice instructions EXACTLY.
 
 ═══════════════════════════════════════════════════════════════════════════════
 REQUIRED VOICE (MANDATORY)
@@ -831,12 +843,6 @@ REQUIRED VOICE (MANDATORY)
 - Formality: ${formalityDesc}
 - Length: ${verbosityDesc}${vocabSection}
 ${quirksSection}
-
-${context.previousMessages?.length ? `═══════════════════════════════════════════════════════════════════════════════
-REPLYING TO:
-${context.previousMessages.slice(-2).join('\n---\n')}` : ''}
-
-${context.emotionalState ? `Current mood: ${context.emotionalState}` : ''}
 
 ═══════════════════════════════════════════════════════════════════════════════
 FORBIDDEN PATTERNS (do NOT use these generic phrases)
@@ -850,12 +856,30 @@ FORBIDDEN PATTERNS (do NOT use these generic phrases)
 • "going forward"
 • Generic corporate speak
 
-═══════════════════════════════════════════════════════════════════════════════
-YOUR TASK:
-${prompt}
-═══════════════════════════════════════════════════════════════════════════════
-
 Write ONLY the email body. Match the voice EXACTLY. No headers or metadata.`;
+  }
+
+  /**
+   * Build the user prompt for a specific email (dynamic per request).
+   * Contains task-specific content and context.
+   */
+  private buildCharacterUserPrompt(prompt: string, context: GenerationContext): string {
+    const parts: string[] = [];
+
+    // Add reply context if available
+    if (context.previousMessages?.length) {
+      parts.push(`REPLYING TO:\n${context.previousMessages.slice(-2).join('\n---\n')}`);
+    }
+
+    // Add emotional state if available
+    if (context.emotionalState) {
+      parts.push(`Current mood: ${context.emotionalState}`);
+    }
+
+    // Add the main task
+    parts.push(`YOUR TASK:\n${prompt}`);
+
+    return parts.join('\n\n');
   }
 
   private incrementCallCount(modelId: ModelIdentifier): void {
