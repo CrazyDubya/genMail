@@ -12,12 +12,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/sdk": "^0.71.2",
     "@hono/node-server": "^1.13.7",
-    "better-sqlite3": "^11.6.0",
+    "better-sqlite3": "^12.5.0",
     "hono": "^4.6.14",
-    "pdf-parse": "^1.1.1",
-    "uuid": "^11.0.3"
+    "pdf-parse": "^2.4.5",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
