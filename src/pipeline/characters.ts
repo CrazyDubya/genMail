@@ -439,8 +439,9 @@ Respond with JSON:
         threadParticipation: 'mixed',
       },
       // NEW: Populate knows[] with actual document knowledge
-      knows: context && concepts
-        ? generateCharacterKnowledge('protagonist', context, concepts)
+      // Use context even if concepts is empty - characters should know thesis/claims
+      knows: context
+        ? generateCharacterKnowledge('protagonist', context, concepts ?? [])
         : [],
       suspects: [],
     };
@@ -557,8 +558,9 @@ Respond with JSON:
       },
       emailBehavior: template.emailBehavior,
       // NEW: Populate knows[] with archetype-specific document knowledge
-      knows: context && concepts
-        ? generateCharacterKnowledge(archetype, context, concepts)
+      // Use context even if concepts is empty - characters should know thesis/claims
+      knows: context
+        ? generateCharacterKnowledge(archetype, context, concepts ?? [])
         : [],
       suspects: [],
     };
@@ -667,8 +669,9 @@ function createBasicCharacter(
       threadParticipation: 'mixed',
     },
     // NEW: Even fallback characters get document knowledge
-    knows: context && concepts
-      ? generateCharacterKnowledge(archetype || 'newcomer', context, concepts)
+    // Use context even if concepts is empty
+    knows: context
+      ? generateCharacterKnowledge(archetype || 'newcomer', context, concepts ?? [])
       : [],
     suspects: [],
   };
