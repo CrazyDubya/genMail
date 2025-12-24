@@ -22,6 +22,7 @@ import type {
   Theme,
   DocumentContext,
   ProcessedDocument,
+  DocumentTension,
 } from '../types.js';
 import type { ModelRouter } from '../models/router.js';
 
@@ -1800,17 +1801,57 @@ export async function runSimulation(
 // =============================================================================
 
 /**
- * Initialize tensions from document themes.
+ * Initialize tensions from document themes and document-detected tensions.
+ *
+ * Priority order:
+ * 1. Document-detected tensions (from detectDocumentTensions)
+ * 2. Theme-based tensions (fallback)
  */
 export async function initializeTensions(
   themes: Theme[],
   characters: Character[],
-  _router: ModelRouter
+  _router: ModelRouter,
+  documentTensions?: DocumentTension[]
 ): Promise<Tension[]> {
   const tensions: Tension[] = [];
 
-  // Create tensions from top themes
-  for (const theme of themes.slice(0, 3)) {
+  // Priority 1: Use document-detected tensions if available
+  if (documentTensions && documentTensions.length > 0) {
+    console.log(`[Tensions] Using ${documentTensions.length} document-detected tensions`);
+
+    for (const docTension of documentTensions.slice(0, 5)) {
+      // Find participants for this tension based on involved concepts
+      const participants = findParticipantsForDocumentTension(docTension, characters);
+
+      if (participants.length >= 1) {
+        tensions.push({
+          id: uuid() as TensionId,
+          type: docTension.type,
+          participants: participants.map((p) => p.id),
+          description: docTension.description,
+          intensity: docTension.intensity,
+          status: 'building',
+          relatedThemes: [],
+          createdAtTick: 0,
+        });
+
+        console.log(
+          `[Tensions] Created "${docTension.type}" tension: "${docTension.description.slice(0, 50)}..." ` +
+          `with ${participants.length} participants`
+        );
+      }
+    }
+
+    // If we got enough tensions from the document, return early
+    if (tensions.length >= 3) {
+      return tensions;
+    }
+  }
+
+  // Priority 2: Create theme-based tensions (fallback or supplement)
+  console.log(`[Tensions] Adding theme-based tensions (${tensions.length} document tensions exist)`);
+
+  for (const theme of themes.slice(0, 3 - tensions.length)) {
     // Find characters who might be involved
     const protagonists = characters.filter((c) => c.archetype === 'protagonist');
     const antagonists = characters.filter((c) => c.archetype === 'antagonist');
@@ -1836,7 +1877,7 @@ export async function initializeTensions(
 
   // Create mystery tension if there's an insider
   const insider = characters.find((c) => c.archetype === 'insider');
-  if (insider) {
+  if (insider && tensions.length < 5) {
     tensions.push({
       id: uuid() as TensionId,
       type: 'secret',
@@ -1850,4 +1891,83 @@ export async function initializeTensions(
   }
 
   return tensions;
+}
+
+/**
+ * Find appropriate character participants for a document-detected tension.
+ * Matches based on character knowledge and archetypes.
+ */
+function findParticipantsForDocumentTension(
+  docTension: DocumentTension,
+  characters: Character[]
+): Character[] {
+  const participants: Character[] = [];
+  const involvedConcepts = docTension.involvedConcepts.map((c) => c.toLowerCase());
+
+  // Score characters based on knowledge overlap with tension concepts
+  const scoredCharacters = characters.map((char) => {
+    let score = 0;
+
+    // Check if character knows about involved concepts
+    for (const knowledge of char.knows) {
+      const lowerKnowledge = knowledge.toLowerCase();
+      for (const concept of involvedConcepts) {
+        if (lowerKnowledge.includes(concept) || concept.includes(lowerKnowledge.slice(0, 10))) {
+          score += 2;
+        }
+      }
+    }
+
+    // Boost scores based on archetype match to tension type
+    switch (docTension.type) {
+      case 'conflict':
+        if (char.archetype === 'protagonist' || char.archetype === 'antagonist') score += 3;
+        if (char.archetype === 'skeptic') score += 2;
+        break;
+      case 'competition':
+        if (char.archetype === 'expert' || char.archetype === 'protagonist') score += 3;
+        break;
+      case 'mystery':
+      case 'secret':
+        if (char.archetype === 'insider' || char.archetype === 'outsider') score += 3;
+        break;
+      case 'opportunity':
+        if (char.archetype === 'enthusiast' || char.archetype === 'newcomer') score += 2;
+        if (char.archetype === 'protagonist') score += 1;
+        break;
+      case 'desire':
+        if (char.archetype === 'protagonist') score += 2;
+        break;
+      case 'revelation':
+        if (char.archetype === 'expert' || char.archetype === 'insider') score += 3;
+        break;
+    }
+
+    return { char, score };
+  });
+
+  // Sort by score and take top participants
+  scoredCharacters.sort((a, b) => b.score - a.score);
+
+  // Take 2-4 participants based on tension type
+  const maxParticipants = docTension.type === 'secret' ? 2 : 4;
+  const minParticipants = docTension.type === 'secret' ? 1 : 2;
+
+  for (const { char, score } of scoredCharacters) {
+    if (score > 0 && participants.length < maxParticipants) {
+      participants.push(char);
+    }
+  }
+
+  // If we don't have enough, add random characters
+  if (participants.length < minParticipants) {
+    const remainingChars = characters.filter(
+      (c) => !participants.includes(c) && c.archetype !== 'spammer'
+    );
+    for (const char of remainingChars.slice(0, minParticipants - participants.length)) {
+      participants.push(char);
+    }
+  }
+
+  return participants;
 }

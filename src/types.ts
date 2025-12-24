@@ -155,6 +155,97 @@ export interface DocumentContext {
   claims: Claim[];
   /** What makes this document significant/novel */
   significance: string;
+  /** Authors and contributors extracted from the document */
+  authors?: Author[];
+  /** Inferred relationships between authors */
+  authorRelationships?: AuthorRelationship[];
+  /** Extracted figures and tables with their findings */
+  figures?: ExtractedFigure[];
+  /** Tensions detected from document structure */
+  documentTensions?: DocumentTension[];
+}
+
+// =============================================================================
+// AUTHOR/CONTRIBUTOR TYPES
+// =============================================================================
+
+export interface Author {
+  id: string;
+  name: string;
+  affiliation?: string;
+  /** Specific contribution if listed (e.g., "designed the architecture") */
+  contribution?: string;
+  /** Order in author list (1 = first author, etc.) */
+  authorPosition: number;
+  /** Whether this is a corresponding author */
+  isCorresponding: boolean;
+  /** Equal contribution flag */
+  equalContribution: boolean;
+  /** Suggested character archetype based on contribution */
+  suggestedArchetype?: CharacterArchetype;
+}
+
+export interface AuthorRelationship {
+  author1Id: string;
+  author2Id: string;
+  /** Type of relationship inferred from the document */
+  relationshipType: 'collaborator' | 'mentor-mentee' | 'equal-contributor' | 'lead-support' | 'cross-institution';
+  /** Strength of evidence for this relationship (0-1) */
+  confidence: number;
+  /** Description of the relationship */
+  description: string;
+}
+
+// =============================================================================
+// FIGURE/TABLE EXTRACTION TYPES
+// =============================================================================
+
+export interface ExtractedFigure {
+  id: string;
+  type: 'table' | 'figure' | 'chart' | 'diagram';
+  /** Caption or title */
+  caption: string;
+  /** Reference number (e.g., "Table 2", "Figure 3") */
+  reference: string;
+  /** Key results or findings from this figure/table */
+  keyFindings: string[];
+  /** Quantitative claims that can be verified */
+  quantitativeClaims: QuantitativeClaim[];
+  /** Which chunk this was found in */
+  sourceChunkId: string;
+}
+
+export interface QuantitativeClaim {
+  statement: string;
+  /** The specific metric or measurement */
+  metric: string;
+  /** The value reported */
+  value: string;
+  /** Comparison (e.g., "vs baseline", "improvement over X") */
+  comparison?: string;
+  /** Evidence source (table/figure reference) */
+  source: string;
+}
+
+// =============================================================================
+// AUTOMATED TENSION TYPES
+// =============================================================================
+
+export interface DocumentTension {
+  id: string;
+  type: TensionType;
+  /** Description of the tension */
+  description: string;
+  /** Source of this tension (methodology debate, comparison, etc.) */
+  source: 'methodology_comparison' | 'result_claim' | 'related_work' | 'limitation' | 'future_work';
+  /** Entities/concepts involved in this tension */
+  involvedConcepts: string[];
+  /** Initial intensity (0-1) */
+  intensity: number;
+  /** Text evidence for this tension */
+  evidence: string;
+  /** Whether this is an internal (within document) or external (vs prior work) tension */
+  scope: 'internal' | 'external';
 }
 
 export interface ArgumentPoint {
