@@ -8,7 +8,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { v4 as uuid } from 'uuid';
-import pdfParse from 'pdf-parse';
+import { PDFParse } from 'pdf-parse';
 import type {
   CreateUniverseRequest,
   CreateUniverseResponse,
@@ -156,11 +156,13 @@ async function parsePdfContent(content: string): Promise<string> {
       buffer = Buffer.from(content, 'binary');
     }
 
-    // Parse the PDF
-    const data = await pdfParse(buffer);
+    // Parse the PDF using the new class-based API
+    const parser = new PDFParse({ data: buffer });
+    const result = await parser.getText();
+    await parser.destroy();
 
     // Return extracted text
-    const text = data.text.trim();
+    const text = result.text.trim();
 
     if (!text || text.length < 50) {
       console.warn('[PDF Parse] Extracted text is very short, PDF may be image-based or corrupted');
