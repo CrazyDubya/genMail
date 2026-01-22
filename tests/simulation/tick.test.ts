@@ -73,7 +73,7 @@ describe('Simulation Tick Engine', () => {
           emotionalExpressiveness: 0.5,
           humor: 0.3,
           idioms: [],
-          signaturePhras es: [],
+          signaturePhrases: [],
         },
       };
 
