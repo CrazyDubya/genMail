@@ -21,10 +21,15 @@ import type {
   ThreadId,
   Theme,
   DocumentContext,
-  ProcessedDocument,
   DocumentTension,
 } from '../types.js';
 import type { ModelRouter } from '../models/router.js';
+import { getMergedDocumentContext, getAllDocumentConcepts } from './context-utils.js';
+import {
+  getCachedThreadAnalysis,
+  clearThreadAnalysisCache as clearCache,
+  type ThreadAnalysis,
+} from './thread-analysis.js';
 
 // =============================================================================
 // TICK CONFIGURATION
@@ -35,122 +40,9 @@ interface TickOptions {
   tickDurationHours?: number;
 }
 
-// =============================================================================
-// MULTI-DOCUMENT CONTEXT MERGING
-// =============================================================================
-
-/**
- * Merge context from all documents in the universe.
- *
- * Previously we only used documents[0]?.context, ignoring all other documents.
- * This function combines thesis, concepts, claims, and summaries from ALL docs.
- */
-function getMergedDocumentContext(documents: ProcessedDocument[]): DocumentContext | undefined {
-  if (documents.length === 0) return undefined;
-  if (documents.length === 1) return documents[0].context;
-
-  // Merge thesis from all docs
-  const theses = documents.map(d => d.context?.thesis).filter(Boolean) as string[];
-  const mergedThesis = theses.length === 1
-    ? theses[0]
-    : theses.join(' Additionally, ');
-
-  // Combine core concepts from all docs (deduplicated)
-  const allConcepts = documents.flatMap(d => d.context?.coreConcepts ?? []);
-  const uniqueConcepts = [...new Set(allConcepts)];
-
-  // Combine claims from all docs
-  const allClaims = documents.flatMap(d => d.context?.claims ?? []);
-
-  // Combine argument structures from all docs
-  const allArguments = documents.flatMap(d => d.context?.argumentStructure ?? []);
-
-  // Combine summaries
-  const allSummaries = documents.map(d => d.context?.summary ?? '').filter(s => s.length > 0);
-  const mergedSummary = allSummaries.join('\n\n--- From another document ---\n\n');
-
-  // Combine significance
-  const allSignificance = documents.map(d => d.context?.significance ?? '').filter(s => s.length > 0);
-  const mergedSignificance = allSignificance.join(' Furthermore, ');
-
-  // Use first document as base for structure fields
-  const baseContext = documents[0].context;
-  if (!baseContext) return undefined;
-
-  return {
-    ...baseContext,
-    thesis: mergedThesis,
-    coreConcepts: uniqueConcepts,
-    claims: allClaims,
-    argumentStructure: allArguments,
-    summary: mergedSummary,
-    significance: mergedSignificance,
-  };
-}
-
-/**
- * Get all rich concepts from all documents.
- */
-function getAllDocumentConcepts(documents: ProcessedDocument[]) {
-  return documents.flatMap(d => d.concepts ?? []);
-}
-
-// =============================================================================
-// THREAD ANALYSIS (Semantic understanding of conversations)
-// =============================================================================
-
-interface ThreadAnalysis {
-  topicsCovered: string[];
-  participantPositions: Array<{ name: string; position: string }>;
-  openQuestions: string[];
-  suggestedDirection: string;
-  emotionalTone: string;
-}
-
-// Thread analysis cache - keyed by thread ID, stores analysis result
-// This prevents redundant LLM calls when generating multiple emails in the same thread
-const threadAnalysisCache = new Map<
-  ThreadId,
-  { analysis: ThreadAnalysis; emailCount: number }
->();
-
-/**
- * Get cached thread analysis or generate new one.
- * Cache is invalidated when the thread has new emails since last analysis.
- */
-async function getCachedThreadAnalysis(
-  threadId: ThreadId,
-  threadEmails: Email[],
-  sender: Character,
-  world: WorldState,
-  router: ModelRouter
-): Promise<ThreadAnalysis | null> {
-  const cached = threadAnalysisCache.get(threadId);
-
-  // Use cache if email count hasn't changed (no new emails in thread)
-  if (cached && cached.emailCount === threadEmails.length) {
-    return cached.analysis;
-  }
-
-  // Generate fresh analysis
-  const analysis = await analyzeThread(threadEmails, sender, world, router);
-
-  // Cache the result if successful
-  if (analysis) {
-    threadAnalysisCache.set(threadId, {
-      analysis,
-      emailCount: threadEmails.length,
-    });
-  }
-
-  return analysis;
-}
-
-/**
- * Clear the thread analysis cache (call between ticks or when starting fresh)
- */
+// Re-export the cache clear function with original name
 export function clearThreadAnalysisCache(): void {
-  threadAnalysisCache.clear();
+  clearCache();
 }
 
 // =============================================================================
@@ -866,73 +758,6 @@ function findUnansweredPoints(
   return unanswered.slice(0, 4);
 }
 
-/**
- * Analyze thread semantically using LLM to understand conversation flow.
- * This provides deep understanding of what's been discussed and what should come next.
- */
-async function analyzeThread(
-  threadEmails: Email[],
-  sender: Character,
-  world: WorldState,
-  router: ModelRouter
-): Promise<ThreadAnalysis | null> {
-  // Only analyze if there are previous emails
-  if (threadEmails.length === 0) {
-    return null;
-  }
-
-  // Build conversation transcript
-  const transcript = threadEmails.map((e) => {
-    const senderChar = world.characters.find((c) => c.id === e.from.characterId);
-    return `[${senderChar?.name ?? e.from.displayName}]: ${e.body}`;
-  }).join('\n\n');
-
-  // Get document context for grounding (merged from all documents)
-  const docContext = getMergedDocumentContext(world.documents);
-  const documentThesis = docContext?.thesis ?? '';
-  const coreConcepts = docContext?.coreConcepts ?? [];
-
-  const prompt = `Analyze this email thread to help a participant write a meaningful response.
-
-DOCUMENT BEING DISCUSSED:
-Thesis: ${documentThesis}
-Key concepts: ${coreConcepts.join(', ')}
-
-EMAIL THREAD:
-${transcript}
-
-NEXT SENDER: ${sender.name} (${sender.archetype})
-
-Analyze and provide:
-1. What specific topics/points have been covered (not vague summaries)
-2. Each participant's position/stance on the document
-3. Open questions that need responses
-4. What direction would advance this conversation productively
-
-Respond with JSON:
-{
-  "topicsCovered": ["specific topic 1", "specific topic 2"],
-  "participantPositions": [
-    {"name": "Person Name", "position": "Their specific stance"}
-  ],
-  "openQuestions": ["Actual question from thread?"],
-  "suggestedDirection": "What ${sender.name} should focus on to advance the discussion",
-  "emotionalTone": "collaborative|contentious|neutral|enthusiastic"
-}`;
-
-  try {
-    // Use a fast model for thread analysis to avoid adding too much latency
-    const result = await router.generateStructured<ThreadAnalysis>(
-      'claude-haiku',
-      prompt,
-      { temperature: 0.3 }
-    );
-    return result;
-  } catch (error) {
-    console.warn('[Thread Analysis] Failed, proceeding without:', error);
-    return null;
-  }
-}
 
 async function generateEmail(
   sender: Character,
@@ -1442,11 +1267,11 @@ function generateArchetypeSpecificBody(
     // If we have document context, use it for a substantive newsletter
     if (thesis || concepts.length > 0) {
       const conceptSection = concepts.length > 0
-        ? `\n\nKey concepts explored:\n${concepts.map(c => `• ${c}`).join('\n')}`
+        ? `\n\nKey concepts explored:\n${concepts.map((c: string) => `• ${c}`).join('\n')}`
         : '';
 
       const claimSection = claims.length > 0
-        ? `\n\nNotable findings:\n${claims.map(c => `• ${c.statement.slice(0, 150)}`).join('\n')}`
+        ? `\n\nNotable findings:\n${claims.map((c: any) => `• ${c.statement.slice(0, 150)}`).join('\n')}`
         : '';
 
       const significanceSection = significance

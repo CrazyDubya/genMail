@@ -274,6 +274,8 @@ npx tsx src/server.ts
 2. **Upload a Document**: POST to `/api/universe/create` with a PDF, TXT, or MD file
 3. **Generate Emails**: The system processes documents → extracts entities → generates characters → simulates world → produces emails
 
+**📖 Full API Documentation**: See [API_DOCUMENTATION.md](./API_DOCUMENTATION.md) for complete endpoint reference, examples, and workflows.
+
 ### Environment Variables
 
 ```env
